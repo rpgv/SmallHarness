@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmallHarness</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">◆</span> SmallHarness <span id="version" class="muted"></span></div>
+  <div class="model">
+    <span id="model-dot" class="dot" title="model not loaded"></span>
+    <span id="model-name">…</span>
+    <span id="model-meta" class="muted"></span>
+    <button id="load-btn" class="small">Load model</button>
+  </div>
+  <span id="instances" class="muted" title="model instances running / how many fit in RAM"></span>
+  <div id="busy" class="busy" hidden><span class="spinner"></span><span id="busy-text"></span>
+    <button id="stop-btn" class="small danger">Stop</button></div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-view="research" class="active">Research</button>
+  <button data-view="planner">Planner</button>
+  <button data-view="recipes">Recipes</button>
+  <button data-view="models">Models</button>
+  <button data-view="settings">Settings</button>
+</nav>
+
+<main>
+  <!-- Research ------------------------------------------------------------ -->
+  <section id="view-research" class="view active">
+    <div class="subtabs" id="research-tabs">
+      <button data-pane="ask" class="active">Ask</button>
+      <button data-pane="bibliography">Bibliography</button>
+      <span class="grow"></span>
+      <label class="check" title="loading time, wait for the first token, and tokens per second under each answer">
+        <input type="checkbox" id="show-speed"> speed</label>
+      <button id="research-new" class="small secondary" title="a new session: no answers, references or attachments">New session</button>
+    </div>
+
+    <div id="pane-ask" class="rpane active">
+      <aside class="notes-side">
+        <div class="row"><strong class="grow">Notes</strong>
+          <button id="note-new" class="small">New</button></div>
+        <ul id="notes" class="list plain"></ul>
+      </aside>
+
+      <div class="ask-main">
+        <div id="attached" class="attached" hidden></div>
+        <div id="answers" class="messages" aria-live="polite"></div>
+        <form id="ask-form" class="composer">
+          <textarea id="ask-input" rows="2" placeholder="Ask about your files and notes…"
+                    title="Enter sends; Shift+Enter starts a new line"></textarea>
+          <button type="submit" id="ask-btn">Ask</button>
+        </form>
+        <div class="files-bar">
+          <div class="row">
+            <strong>Files</strong>
+            <span id="scope-line" class="muted grow"></span>
+            <button id="scope-all" class="small link" title="questions search everything">search all</button>
+          </div>
+          <div id="files" class="chips"></div>
+          <form id="add-form" class="row">
+            <input id="add-path" placeholder="add a file or folder from the workspace">
+            <button class="small secondary">Add</button>
+            <label class="upload small">Upload <input type="file" id="upload" multiple
+              accept=".txt,.md,.py,.sh,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif,.webp"></label>
+          </form>
+          <p id="add-result" class="hint" hidden></p>
+          <p id="research-search" class="hint"></p>
+        </div>
+      </div>
+    </div>
+
+    <div id="pane-bibliography" class="rpane split">
+      <aside class="side">
+        <p class="hint">Every excerpt an answer rested on, numbered for this session.</p>
+        <ul id="refs" class="list"></ul>
+      </aside>
+      <div class="pane">
+        <div id="ref-empty" class="hint">Pick a reference, or click a [n] in an answer.</div>
+        <div id="ref-detail" hidden>
+          <h2 id="ref-title"></h2>
+          <p id="ref-source" class="muted"></p>
+          <pre id="ref-text" class="out ref"></pre>
+        </div>
+      </div>
+    </div>
+
+    <dialog id="note-dialog" class="note-dialog">
+      <div class="row">
+        <strong id="note-title" class="grow">New note</strong>
+        <span id="note-meta" class="muted"></span>
+      </div>
+      <p class="hint">Notes are part of the knowledge base. <code>#tags</code> are optional.</p>
+      <textarea id="note-text" class="editor" placeholder="Write a note… #idea"></textarea>
+      <div class="row">
+        <button id="note-save">Save</button>
+        <button id="note-close" class="secondary">Close</button>
+        <span id="note-status" class="muted"></span>
+        <span class="grow"></span>
+        <button id="note-delete" class="danger" hidden>Delete</button>
+      </div>
+    </dialog>
+  </section>
+
+  <!-- Planner ------------------------------------------------------------- -->
+  <section id="view-planner" class="view">
+    <div class="split">
+      <aside class="side">
+        <form id="plan-form" class="stack">
+          <textarea id="plan-goal" rows="3" placeholder="Goal for a new plan…"></textarea>
+          <div class="row">
+            <button type="submit" class="grow" title="the model writes the steps">Create plan</button>
+            <button type="button" id="plan-draft" class="secondary" title="write the steps yourself; no model">Draft by hand</button>
+          </div>
+        </form>
+        <ul id="plan-list" class="list"></ul>
+      </aside>
+      <div class="pane">
+        <div id="plan-empty" class="hint">Create a plan or pick one on the left.</div>
+        <div id="plan-editor" class="stack" hidden>
+          <h2 id="plan-editor-title">Draft a plan</h2>
+          <input id="plan-edit-goal" placeholder="Goal">
+          <textarea id="plan-edit-text" class="editor" spellcheck="false"
+                    placeholder="1. [safe_read_file] Read the CLI&#10;   details of step 1, indented&#10;2. [none] Add --verbose (after: 1)"></textarea>
+          <p class="hint">One step per line: <code>N. [tool] what to do (after: N)</code>; its details on the
+            indented lines below it. A step you leave unchanged keeps its status.</p>
+          <p id="plan-edit-tools" class="hint"></p>
+          <div class="row">
+            <button id="plan-edit-save">Save plan</button>
+            <button id="plan-edit-cancel" class="secondary">Cancel</button>
+          </div>
+        </div>
+        <div id="plan-detail" hidden>
+          <div class="row"><h2 id="plan-goal-text" class="grow"></h2>
+            <button id="plan-edit" class="small secondary">Edit</button></div>
+          <ol id="plan-tasks" class="tasks"></ol>
+          <div class="runbar">
+            <strong>Expand</strong>
+            <label>steps <input id="expand-steps" placeholder="all" class="num-wide"></label>
+            <label>passes <input id="expand-times" type="number" min="1" max="5" value="1" class="num"></label>
+            <label class="check"><input type="checkbox" id="expand-parallel" checked> parallel</label>
+            <button id="expand-btn" class="secondary">Expand</button>
+          </div>
+          <div class="runbar">
+            <strong>Run</strong>
+            <select id="run-mode">
+              <option value="fresh">fresh: a new context per step</option>
+              <option value="continuous">continuous: one context for all</option>
+            </select>
+            <label class="check" title="independent steps at the same time, as RAM allows (fresh only)">
+              <input type="checkbox" id="run-parallel"> parallel</label>
+            <button id="run-btn">Run</button>
+          </div>
+          <p class="hint">Runs use the workspace tools; risky ones ask you first. They see the plan, the step's
+            details and earlier results; nothing from the knowledge base.</p>
+          <div id="run-log" class="log"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Recipes ------------------------------------------------------------- -->
+  <section id="view-recipes" class="view">
+    <div class="split">
+      <aside class="side">
+        <div class="row"><strong class="grow">Recipes</strong><button id="recipe-new" class="small">New</button></div>
+        <ul id="recipe-list" class="list"></ul>
+      </aside>
+      <div class="pane">
+        <p class="hint">A recipe is turned into a file one section at a time. Separate sections with an empty
+          line and describe in each what to write. Every section is written by its own model call that sees only
+          that section; its only tool is <code>risky_write_file</code>, which you allow once.</p>
+        <div class="row">
+          <input id="recipe-name" placeholder="name" class="num-wide">
+          <span class="muted">→</span>
+          <input id="recipe-target" placeholder="file to write, e.g. src/shapes.py or docs/intro.md">
+          <select id="recipe-mode" title="code: functions and classes · text: Markdown paragraphs">
+            <option value="">by file type</option>
+            <option value="code">code</option>
+            <option value="text">text (Markdown)</option>
+          </select>
+        </div>
+        <textarea id="recipe-text" class="editor" spellcheck="false"
+                  placeholder="area(radius: float) -> float&#10;returns the area of a circle, using math.pi&#10;&#10;class Circle&#10;holds a radius; method area() -> float uses area()"></textarea>
+        <div class="row">
+          <button id="recipe-save" class="secondary">Save</button>
+          <button id="recipe-run">Write</button>
+          <label class="check" title="also rewrite sections that are already written"><input type="checkbox" id="recipe-all"> all sections</label>
+          <label class="check" title="several sections at once, as RAM allows"><input type="checkbox" id="recipe-parallel"> parallel</label>
+          <span id="recipe-status" class="muted"></span>
+          <span class="grow"></span>
+          <button id="recipe-delete" class="danger" hidden>Delete</button>
+        </div>
+        <ol id="recipe-sections" class="tasks"></ol>
+        <div id="recipe-log" class="log"></div>
+        <div class="card library-card">
+          <h3>Code library</h3>
+          <p class="hint">Code mode keeps each section as a snippet, one library per language. Before a section is
+            written, its library is searched: a near-duplicate is reused without the model, and similar snippets are
+            offered to it.</p>
+          <div class="row">
+            <select id="library-lang"></select>
+            <input id="library-q" type="search" placeholder="Search snippets…">
+          </div>
+          <ul id="snippet-list" class="list plain"></ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Models -------------------------------------------------------------- -->
+  <section id="view-models" class="view">
+    <div class="card">
+      <h3>Models <span id="models-where" class="muted"></span></h3>
+      <p id="models-error" class="error" hidden></p>
+      <table class="table"><thead><tr><th></th><th>Name</th><th>Size</th><th>Context</th><th>Source</th><th></th></tr></thead>
+        <tbody id="models-local"></tbody></table>
+    </div>
+    <div class="card">
+      <h3>Download</h3>
+      <form id="pull-form" class="row"><input id="pull-name" placeholder="a name below, hf:OWNER/REPO/FILE, or an Ollama name"><button>Pull</button></form>
+      <div id="pull-progress" class="progress" hidden><div></div><span></span></div>
+      <table class="table"><tbody id="models-available"></tbody></table>
+    </div>
+  </section>
+
+  <!-- Settings ------------------------------------------------------------ -->
+  <section id="view-settings" class="view">
+    <div class="card">
+      <h3>Status</h3>
+      <dl id="status-list" class="kv"></dl>
+    </div>
+    <div class="card">
+      <h3>Settings <span id="config-files" class="muted"></span></h3>
+      <div class="row">
+        <input id="config-filter" type="search" placeholder="Filter, e.g. model or rag.embed">
+        <label class="check"><input type="checkbox" id="config-changed"> changed only</label>
+        <span class="grow"></span>
+        <button id="config-save" disabled>Apply changes</button>
+      </div>
+      <p class="hint">Changes apply to this run; put them in smallharness.toml to keep them.</p>
+      <table class="table config"><tbody id="config-rows"></tbody></table>
+    </div>
+    <div class="card">
+      <h3>Planner tools</h3>
+      <table class="table"><tbody id="tool-rows"></tbody></table>
+    </div>
+  </section>
+</main>
+
+<dialog id="permit">
+  <form method="dialog">
+    <h3>Permission required</h3>
+    <p><strong id="permit-tool" class="risky"></strong> <span id="permit-desc" class="muted"></span></p>
+    <pre id="permit-args" class="out"></pre>
+    <div class="row"><span class="grow"></span>
+      <button value="deny" class="secondary">Deny</button>
+      <button value="allow" class="danger">Allow</button></div>
+  </form>
+</dialog>
+<div id="toast" class="toast" hidden></div>
+</body>
+</html>

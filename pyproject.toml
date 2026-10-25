@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smallharness"
+version = "3.0.0"
+description = "A rigid harness that offloads context, tool and plan management from small local models (LiteRT-LM)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastembed>=0.9.0",
+]
+
+[project.optional-dependencies]
+litert = ["litert-lm-api"]
+ram = ["psutil"]
+embed = ["fastembed"]
+
+[project.scripts]
+smallharness = "smallharness.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["smallharness*"]
+
+[tool.setuptools.package-data]
+# Not packages, so listed here: the built-in tool files and the web interface's page.
+smallharness = ["tools/builtin/*.py", "web/static/*"]

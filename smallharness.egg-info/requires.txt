@@ -1,0 +1,10 @@
+fastembed>=0.9.0
+
+[embed]
+fastembed
+
+[litert]
+litert-lm-api
+
+[ram]
+psutil

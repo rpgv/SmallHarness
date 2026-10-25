@@ -1,0 +1,121 @@
+# Copy to smallharness.toml in your project (or ~/.config/smallharness/config.toml).
+# Every key is optional; these are the defaults unless noted.
+# While running: /config reload re-reads this file, /config set KEY=VALUE changes a
+# setting for the current run, /model switches models.
+
+[model]
+backend = "litert"               # litert | ollama | mock
+path = "Qwen3_1.7B"              # a name from `smallharness models`, a file path, or an imported ID
+                                 # (ollama: an Ollama model name, e.g. "qwen3:0.6b")
+context_tokens = "auto"          # or a number. auto: the model's maximum, read from the .litertlm file
+auto_context_max = 8192          # cap for auto: long prompts are slow to process on CPU (0 = no cap)
+max_output_tokens = 768
+template = "plain"               # plain for the LiteRT-LM Conversation API; gemma for raw-text runtimes
+
+[litert]
+mode = "auto"                    # auto: server if launch/base_url is set, else python. Never picks cli.
+accelerator = "cpu"              # cpu | gpu (python mode)
+
+[litert.server]                  # recommended: model stays loaded, output streams
+launch = true                    # harness starts one `litert-lm serve` per instance, stops it on exit
+command = ["litert-lm", "serve", "--host", "127.0.0.1", "--port", "{port}"]   # serve defaults to 0.0.0.0
+port = 9379                      # first port tried; later instances use free ports
+startup_timeout = 120
+base_url = ""                    # with launch = false: a server you started, e.g. "http://127.0.0.1:9379"
+model = ""                       # imported model ID (`litert-lm list`); empty = the [model].path file, imported
+                                 # ([models].auto_import), else the first one listed
+api_key = ""
+max_concurrent = 1               # requests one server handles at once
+timeout = 600
+
+[litert.cli]                     # mode = "cli" only: one process per call, model reloaded each time
+# Placeholders: {model} {accelerator} {context_tokens} {prompt} {prompt_file}
+command = ["litert-lm", "run", "{model}", "--prompt", "{prompt}", "--max-num-tokens", "{context_tokens}", "--cache", "disk"]
+prompt_via = "arg"               # `litert-lm run` only takes --prompt; stdin | file need another wrapper
+output_regex = ""                # test with `smallharness check --probe`
+timeout = 600
+
+[ollama]                         # backend = "ollama": a running Ollama server (`ollama serve`)
+base_url = "http://127.0.0.1:11434"
+model = ""                       # e.g. "qwen3:0.6b"; empty = [model].path, else the first one Ollama lists
+keep_alive = ""                  # how long Ollama keeps the model loaded, e.g. "30m"; empty = its default
+think = ""                       # true | false for reasoning models (false is faster); empty = Ollama's default
+max_concurrent = 1               # requests at once; match OLLAMA_NUM_PARALLEL
+timeout = 600
+
+[resources]
+manage_ram = false               # false: skip all RAM checks and run exactly one instance
+reserve_ram_mb = 1024            # keep this much free for the OS
+overhead_factor = 1.25           # runtime RAM over model file size
+kv_cache_mb = 0                  # 0 = exact from the model file's KV-cache tensors, else estimated
+model_mb = 0                     # model size, when [model].path is an imported ID instead of a file
+max_instances = 4
+
+[context]
+refresh_threshold = 0.80         # auto-refresh when the window is this full
+auto_refresh = true
+keep_recent_turns = 4
+auto_retrieve = true             # add relevant RAG snippets to every prompt
+retrieve_k = 3
+retrieve_budget = 0.20
+cag_budget = 0.25
+summary_budget = 0.10
+
+[tools]
+auto = true                      # model may call tools itself (type 1 still asks)
+max_steps = 6
+max_result_chars = 3000
+extra_dirs = []                  # more folders of drop-in tools
+
+[plan]
+default_mode = "fresh"           # fresh | continuous
+parallel = false                 # run independent tasks on several instances
+specify = "fresh"                # specify each task (<= 3 sentences) before it runs: fresh | always | never
+
+[heartbeat]                      # /heartbeat: run the plan unattended
+max_beats = 20                   # stop after this many beats (one task attempt each)
+interval = 0                     # seconds between beats
+retries = 1                      # attempts after a failure before the task stays failed
+
+[rag]                            # what /index accepts, in single files and whole folders
+text_suffixes = [".txt", ".md", ".py", ".sh"]
+pdf_suffixes = [".pdf"]
+image_suffixes = [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp"]
+max_text_mb = 2
+max_ocr_mb = 50                  # PDFs and images
+
+[rag.ocr]                        # needs poppler and tesseract: brew install tesseract poppler
+pdf_mode = "auto"                # auto: keep a page's own text, OCR pages without any | always: OCR every page
+min_page_chars = 40              # pages with less text than this are OCR'd
+lang = "eng"                     # tesseract languages, e.g. "eng+por" (install the language data)
+dpi = 200                        # resolution PDF pages are rendered at for OCR
+# Placeholders: {input} {output} {page} {lang} {dpi}
+pdf_text = ["pdftotext", "-layout", "-enc", "UTF-8", "{input}", "-"]
+pdf_render = ["pdftoppm", "-r", "{dpi}", "-f", "{page}", "-l", "{page}", "-png", "{input}", "{output}"]
+image = ["tesseract", "{input}", "stdout", "-l", "{lang}"]
+timeout = 300                    # seconds per command
+
+[rag.embed]                      # hybrid search: keywords (BM25) + meaning (embeddings), ranked together
+backend = "none"                 # none: keywords only | server: OpenAI-compatible /v1/embeddings | fastembed: in-process
+base_url = ""                    # server: e.g. "http://127.0.0.1:11434" (Ollama); empty = [litert.server].base_url
+model = ""                       # server: embedding model ID, e.g. "nomic-embed-text" or "all-minilm"
+api_key = ""
+fastembed_model = "BAAI/bge-small-en-v1.5"   # fastembed: pip install fastembed
+query_prefix = ""                # some models need these, e.g. nomic: "search_query: " / "search_document: "
+doc_prefix = ""
+min_similarity = 0.3             # ignore chunks less similar than this; `smallharness check --probe` suggests a value
+batch = 32
+timeout = 60
+ram_mb = 0                       # fastembed: RAM kept free for it in the RAM check (0 = 300)
+
+[models]                         # `smallharness models` lists them, `smallharness pull NAME` downloads
+dir = ""                         # empty: models/ in the SmallHarness checkout, else ~/.local/share/smallharness/models
+hf_endpoint = "https://huggingface.co"
+hf_token = ""                    # for gated models; prefer the HF_TOKEN environment variable
+auto_import = true               # server mode: import model files into `litert-lm`'s store (a hard link)
+timeout = 60                     # seconds without data before a download gives up
+
+[ui]
+profile = "general"              # general | coding | planning | analysis | <.smallharness/profiles/NAME.md>
+color = true
+banner = "first"                 # ASCII title: first (first run only) | always | never
