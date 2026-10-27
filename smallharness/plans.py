@@ -61,6 +61,22 @@ class Plan:
         bad = {t.num for t in self.tasks if t.status in ("failed", "skipped")}
         return [t for t in self.tasks if t.status == "pending" and any(a in bad for a in t.after)]
 
+    def mark(self, nums: list[int] | None, done: bool) -> None:
+        """Tick tasks off by hand, or untick them so the next run does them again
+        (`nums` None: every task)."""
+        tasks = self.tasks if nums is None else [self.get(n) for n in nums]
+        missing = [n for n, t in zip(nums or [], tasks) if t is None]
+        if missing:
+            raise NotFound(f"no task {missing[0]}")
+        for t in tasks:
+            if t.status == "running":
+                raise Invalid(f"task {t.num} is running")
+        for t in tasks:
+            if done and t.status != "done":
+                t.status, t.result = "done", "ticked off by hand"
+            elif not done:
+                t.status, t.result = "pending", ""
+
     @property
     def finished(self) -> bool:
         return all(t.status != "pending" for t in self.tasks)
@@ -123,6 +139,13 @@ class PlanStore:
     def save(self, plan: Plan) -> None:
         self._path(plan.id).write_text(json.dumps(asdict(plan), indent=2))
         (self.dir / f"{plan.id}.md").write_text(f"GOAL: {plan.goal}\n\n{plan_text(plan)}\n")
+
+    def delete(self, plan_id: str) -> None:
+        path = self._path(plan_id)
+        if not path.is_file():
+            raise NotFound(f"no plan {plan_id}")
+        path.unlink()
+        path.with_suffix(".md").unlink(missing_ok=True)
 
     def add(self, plan: Plan) -> Plan:
         """Save a new plan under an id no other plan has (two plans in one second)."""

@@ -82,6 +82,7 @@ class Section:
     key: str = ""                  # hash of target + text when the code was written
     snippet: str = ""              # code mode: its file in the code library (snippets.py)
     reused: bool = False           # taken from the library, not written for this recipe
+    redo: bool = False             # unticked by hand: the next run writes it anew
 
 
 @dataclass
@@ -207,7 +208,26 @@ def load_recipe(cfg, path: Path, target: str | None = None, mode: str | None = N
             if prev and prev.get("key") == recipe.key(s):
                 s.status, s.code, s.note, s.key = prev["status"], prev.get("code", ""), prev.get("note", ""), prev["key"]
                 s.snippet, s.reused = prev.get("snippet", ""), prev.get("reused", False)
+                s.redo = prev.get("redo", False)
     return recipe
+
+
+def mark_sections(recipe: Recipe, nums: list[int] | None, done: bool) -> None:
+    """Untick sections so the next run writes them again (the model writes them anew,
+    rather than taking them from the code library), or tick back ones whose code is
+    still that of their current text. `nums` None: every section."""
+    sections = recipe.sections if nums is None else [s for s in recipe.sections if s.num in nums]
+    missing = sorted(set(nums or []) - {s.num for s in sections})
+    if missing:
+        raise NotFound(f"no section {missing[0]}: the recipe has {len(recipe.sections)}")
+    for s in sections:
+        if done and recipe.state(s) != "done":
+            if not (s.code or s.snippet) or s.key != recipe.key(s):
+                raise Invalid(f"section {s.num} has no code for its current text: write it instead")
+            s.status, s.redo = "done", False
+        elif not done and (s.status != "pending" or not s.redo):
+            s.status, s.redo = "pending", True
+    recipe.save_cache()
 
 
 def recipes_dir(h_or_cfg) -> Path:
@@ -359,11 +379,12 @@ class RecipeRunner:
             # Never this recipe's other sections: each section sees only itself, and the
             # file would hold the same code twice.
             siblings = {x.text for x in r.sections if x is not s}
-            same = lib.match(s.text, cfg["reuse_similarity"], siblings)
+            same = None if s.redo else lib.match(s.text, cfg["reuse_similarity"], siblings)
             if same:
                 self._reuse(s, same.id, f"reused {same.id}: written for a section like this one")
                 return
-            offered = {sn.id: sn.description for sn in lib.search(s.text, cfg["library_k"], siblings)}
+            offered = {sn.id: sn.description for sn in lib.search(s.text, cfg["library_k"], siblings)
+                       if not (s.redo and sn.id == s.snippet)}
         library = prompts.LIBRARY.format(snippets="\n\n".join(
             f"[{sid}] {about}\n{_head(lib.code(sid))}" for sid, about in offered.items())) if offered else ""
         prompt = prompts.RECIPE[r.mode].format(target=r.target, num=s.num, total=len(r.sections), section=s.text,
@@ -381,7 +402,7 @@ class RecipeRunner:
             if code is not None and r.mode == "code" and lang == "Python":
                 problem = _python_error(code, r.target)
             if code is not None and not problem:
-                s.status, s.code, s.note, s.key, s.reused = "done", code, "", r.key(s), False
+                s.status, s.code, s.note, s.key, s.reused, s.redo = "done", code, "", r.key(s), False, False
                 s.snippet = lib.add(code, s.text, r.name).id if lib else ""
                 return
             history += [("user", ask), ("assistant", reply.strip()[:4000])]
@@ -393,7 +414,7 @@ class RecipeRunner:
     def _reuse(self, s: Section, snippet_id: str, note: str) -> None:
         self.library.used_by(snippet_id, self.recipe.name)
         s.status, s.code, s.note, s.key = "done", self.library.code(snippet_id), note, self.recipe.key(s)
-        s.snippet, s.reused = snippet_id, True
+        s.snippet, s.reused, s.redo = snippet_id, True, False
 
     def _code_from(self, reply: str) -> tuple[str | None, str]:
         """The code from the model's write call, or from a lone code block."""
@@ -428,6 +449,7 @@ class RecipeRunner:
                                        self.ctx, lambda tool, args: True)
         if not outcome.ok:
             raise RuntimeError(outcome.text)
+        self.h.relics.record(self.recipe.target, f"recipe:{self.recipe.name}")
 
 
 _REUSE = re.compile(r"^\s*REUSE\s+\[?([\w-]+)\]?\s*$")

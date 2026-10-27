@@ -83,7 +83,7 @@ def probe_embedder(h: Harness) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="smallharness",
-        description="Small local models (LiteRT-LM, or Ollama), used through three modes: research, "
+        description="Small local models (LiteRT-LM, or Ollama), used through four modes: chat, research, "
                     "planner and recipe. Without a command, choose a mode.")
     p.add_argument("-m", "--model", help="a model file, a name from `smallharness models`, or (ollama) a model name")
     p.add_argument("-b", "--backend", choices=["litert", "ollama", "mock"])
@@ -95,6 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="trust this workspace's tools and commands for this run, without asking")
     p.add_argument("--version", action="version", version=f"smallharness {__version__}")
     sub = p.add_subparsers(dest="cmd")
+    ch = sub.add_parser("chat", help="chat with the model; tools only on command (with a message: reply and exit)")
+    ch.add_argument("message", nargs="*")
     rs = sub.add_parser("research", help="ask questions of your files and notes (with a question: answer and exit)")
     rs.add_argument("question", nargs="*")
     ask = sub.add_parser("ask", help="one research question: answer from the knowledge base and exit")
@@ -137,7 +139,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-MODES = {"research": ("ask questions of your files and notes, with references", "ResearchShell"),
+MODES = {"chat": ("talk with the model; tools and other modes only on command", "ChatShell"),
+         "research": ("ask questions of your files and notes, with references", "ResearchShell"),
          "planner": ("plan code changes, expand the steps, run them", "PlannerShell"),
          "recipe": ("turn a section-by-section recipe into code or text", "RecipeShell")}
 
@@ -166,9 +169,9 @@ def choose_mode() -> str | None:
 
 def run_modes(h: Harness, events, first: str | None, no_color: bool) -> int:
     """The chosen mode, then the menu again after /mode, until /exit."""
-    from . import planner_mode, recipe_mode, research_mode
-    classes = {"research": research_mode.ResearchShell, "planner": planner_mode.PlannerShell,
-               "recipe": recipe_mode.RecipeShell}
+    from . import chat_mode, planner_mode, recipe_mode, research_mode
+    classes = {"chat": chat_mode.ChatShell, "research": research_mode.ResearchShell,
+               "planner": planner_mode.PlannerShell, "recipe": recipe_mode.RecipeShell}
     setup_readline(h.cfg.state.history)
     mode = first or choose_mode()
     while mode:
@@ -281,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if name else 1
     if args.cmd == "delete":
         return 0 if delete_model(cfg, args.name, assume_yes=args.yes) else 1
-    interactive = args.cmd in (None, "research", "plan", "web", "recipe")
+    interactive = args.cmd in (None, "chat", "research", "plan", "web", "recipe")
     confirm_trust(cfg, interactive and sys.stdin.isatty())
     for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
         if sig is not None:
@@ -332,6 +335,12 @@ def _run(h: Harness, cfg: Config, args, events: Events) -> int:
         print(ui.err(f"cannot start model: {e}"))
         print(ui.dim("try the mock backend first: smallharness --backend mock"))
         return 1
+    if args.cmd == "chat" and args.message:
+        from .chat_mode import ChatShell
+        shell = ChatShell(h, events, args.no_color)
+        shell.send(" ".join(args.message), 0)
+        print(ui.dim(f"  kept as chat {shell.chat.id}"))
+        return 0
     if args.cmd in ("ask", "research") and args.question:
         from .research_mode import ResearchShell
         shell = ResearchShell(h, events, args.no_color)
@@ -353,5 +362,5 @@ def _run(h: Harness, cfg: Config, args, events: Events) -> int:
         mode = "text" if args.text else "code" if args.code else None
         return RecipeShell(h, events, args.no_color).write(args.recipe, args.to, mode, args.all, only,
                                                            args.parallel, args.yes)
-    first = {"research": "research", "plan": "planner", "recipe": "recipe"}.get(args.cmd)
+    first = {"chat": "chat", "research": "research", "plan": "planner", "recipe": "recipe"}.get(args.cmd)
     return run_modes(h, events, first, args.no_color)

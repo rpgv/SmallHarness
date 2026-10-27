@@ -141,6 +141,7 @@ class PlanRunner:
     def run_task(self, t: Task, events: Events | None = None) -> Task:
         t.status = "running"
         agent = Agent(self.h, self._context(), events or self.events)
+        agent.tool_ctx.extra["origin"] = f"plan:{self.plan.id}"
         try:
             answer = agent.respond(self._prompt(t), auto_tools=True, stream=events is None)
         except Exception as e:

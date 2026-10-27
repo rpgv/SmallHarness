@@ -8,8 +8,10 @@ is JSON (or, for an upload, binary), which a page on another site can only send 
 CORS preflight that this server never approves. So other sites cannot drive the API.
 
 Model work (research answers, plans, recipes, loading, switching, pulls) runs one
-request at a time; a second one gets 409. The knowledge base, notes and settings work
-at any time, before a model is loaded.
+request at a time; a second one gets 409. Plan runs, expansions and recipe runs work in
+the background: their reply follows the run, and if the page goes away the run goes on,
+and any page can follow it again (GET /api/jobs/ID/events?since=N). The knowledge base,
+notes and settings work at any time, before a model is loaded.
 """
 from __future__ import annotations
 
@@ -22,8 +24,11 @@ from urllib.parse import parse_qs, urlparse
 from .. import __version__
 from ..agent import Harness
 from ..errors import HarnessError
-from .app import STATIC, TYPES, ApiError, WebApp, WebEvents
+from .app import STATIC, TYPES, ApiError, Job, WebApp, WebEvents
 from .routes import BINARY_ROUTES, ROUTES
+
+
+FOLLOW_PING = 15   # seconds a follower waits for an event before checking the page is there
 
 
 # ---------------------------------------------------------------- server
@@ -121,7 +126,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # report, do not kill the server
             self._json(500, {"error": f"{type(e).__name__}: {e}"})
             return
-        if callable(result):
+        if isinstance(result, Job):
+            since = query.get("since", "0")
+            self._follow(result, int(since) if since.isdigit() else 0)
+        elif callable(result):
             self._stream(result)
         else:
             self._json(200, result)
@@ -146,6 +154,31 @@ class Handler(BaseHTTPRequestHandler):
             self._try(write, {"type": "stopped", "state": self.app.state()})
         except Exception as e:
             self._try(write, {"type": "error", "error": f"{type(e).__name__}: {e}"})
+
+    def _follow(self, job: Job, since: int) -> None:
+        """NDJSON: the job, then its events from number `since`, each with its number
+        ('seq'), until it ends. A page that goes away stops following, not the job."""
+        self._headers(200, "application/x-ndjson")
+        self.close_connection = True
+
+        def line(obj: dict) -> None:
+            self.wfile.write(json.dumps(obj, default=str).encode() + b"\n")
+            self.wfile.flush()
+        try:
+            line({"type": "job", **job.info()})
+            while True:
+                events, finished = job.wait(since, FOLLOW_PING)
+                for seq, ev in enumerate(events, since):
+                    if ev["type"] == "permit" and ev["id"] not in self.app.pending:
+                        continue                  # answered already: do not ask again
+                    line({**ev, "seq": seq})
+                since += len(events)
+                if finished:
+                    break
+                if not events:
+                    line({"type": "ping"})         # finds a page that went away
+        except OSError:
+            pass
 
     @staticmethod
     def _try(write, obj) -> None:

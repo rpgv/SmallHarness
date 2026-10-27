@@ -4,18 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smallharness"
-version = "3.0.0"
+version = "1.0.0"
 description = "A rigid harness that offloads context, tool and plan management from small local models (LiteRT-LM)."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "fastembed>=0.9.0",
-]
+# The harness itself is standard library only; each extra adds one capability.
+dependencies = []
 
 [project.optional-dependencies]
-litert = ["litert-lm-api"]
-ram = ["psutil"]
-embed = ["fastembed"]
+litert = ["litert-lm>=0.18.1"]     # the `litert-lm` CLI (`litert-lm serve`) and its Python API
+ram = ["psutil"]                   # RAM-aware sizing of model instances
+embed = ["fastembed>=0.9.0"]       # search by meaning in the knowledge base
+all = ["smallharness[litert,ram,embed]"]
 
 [project.scripts]
 smallharness = "smallharness.cli:main"

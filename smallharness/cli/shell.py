@@ -1,5 +1,5 @@
 """What every terminal mode shares: the input loop, help, switching modes, status, and
-the model and settings commands. Each mode (research, planner, recipe) adds its own
+the model and settings commands. Each mode (chat, research, planner, recipe) adds its own
 commands and decides what plain text means."""
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ SWITCH = "switch"      # what a command returns to go back to the mode menu
 
 COMMON_HELP = [
     ("/help", "show this help"),
-    ("/mode", "go back to the mode menu (research, planner, recipe)"),
+    ("/mode", "go back to the mode menu (chat, research, planner, recipe)"),
     ("/status", "model, instances, search"),
     ("/model [NAME|PATH|ID] [ctx=N|auto …]", "show the model, or switch to another one"),
     ("/models, /pull NAME, /delete NAME", "list, download or delete models"),
@@ -105,11 +105,14 @@ class Shell:
 
     def _read(self) -> str:
         print()
-        lines = [input(ui.accent(ui.bold(f"{self.name} › ")))]
+        lines = [input(ui.accent(ui.bold(f"{self.prompt_name()} › ")))]
         while lines[-1].endswith("\\"):
             lines[-1] = lines[-1][:-1]
             lines.append(input(ui.dim(". ")))
         return "\n".join(lines)
+
+    def prompt_name(self) -> str:
+        return self.name
 
     def text(self, line: str):
         """What plain text (not a /command) does in this mode."""

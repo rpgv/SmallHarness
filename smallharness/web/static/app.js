@@ -1,5 +1,6 @@
 "use strict";
-// SmallHarness web interface: Research, Planner, Recipes, Models, Settings. Plain DOM,
+// SmallHarness web interface: Chat, Research, Notes, Planner, Recipes, Models, Settings, and
+// Relics (the files recipes and plans made) under the tabs. Plain DOM,
 // no libraries; every text is set with textContent, so model output and notes are
 // never interpreted as HTML.
 
@@ -42,13 +43,16 @@ async function api(method, path, body) {
   return data;
 }
 
-// A streamed request: calls onEvent for each NDJSON line; resolves with the last event.
+// A streamed request (a GET when there is no body): calls onEvent for each NDJSON line;
+// resolves with the last event. An error reply or error event throws with `server` set;
+// a dropped connection throws without it, or resolves with a last event that is not the end.
+const serverError = (message) => Object.assign(new Error(message), { server: true });
 async function stream(path, body, onEvent) {
-  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify(body) });
+  const res = await fetch(path, body === undefined ? {} :
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `${res.status} ${res.statusText}`);
+    throw serverError(data.error || `${res.status} ${res.statusText}`);
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -65,10 +69,11 @@ async function stream(path, body, onEvent) {
       const ev = JSON.parse(line);
       last = ev;
       if (ev.type === "permit") askPermission(ev);
-      else onEvent(ev);
+      else if (ev.type === "permit_end") dropPermission(ev.id);
+      else if (ev.type !== "ping") onEvent(ev);
     }
   }
-  if (last && last.type === "error") throw new Error(last.error);
+  if (last && last.type === "error") throw serverError(last.error);
   return last;
 }
 
@@ -91,8 +96,14 @@ function renderState(s) {
   setBusy(s.busy);
   renderStatus(s);
 }
+let firstState = true;
 async function refreshState() {
-  try { renderState(await api("GET", "/api/state")); } catch (e) { toast(e.message, true); }
+  try {
+    const s = await api("GET", "/api/state");
+    renderState(s);
+    if (s.job && !s.job.finished && !running) joinRun(s.job, firstState);   // started before this page, or elsewhere
+    firstState = false;
+  } catch (e) { toast(e.message, true); }
 }
 function renderStatus(s) {
   const rows = [
@@ -120,18 +131,37 @@ $("stop-btn").addEventListener("click", () => api("POST", "/api/stop").catch(() 
 // ------------------------------------------------------------------ tabs
 const loaders = {};
 function show(view) {
-  for (const b of $("tabs").children) b.classList.toggle("active", b.dataset.view === view);
+  for (const b of $("tabs").querySelectorAll("button[data-view]")) b.classList.toggle("active", b.dataset.view === view);
   for (const v of document.querySelectorAll(".view")) v.classList.toggle("active", v.id === "view-" + view);
   remember("sh-view", view);
   if (loaders[view]) loaders[view]();
 }
 $("tabs").addEventListener("click", (e) => { if (e.target.dataset.view) show(e.target.dataset.view); });
+// sub-tabs: buttons with data-pane in `bar`, each showing the element `prefix + pane`
+function subTabs(bar, prefix, key) {
+  const panes = [...$(bar).querySelectorAll("button[data-pane]")].map((b) => b.dataset.pane);
+  const pick = (pane) => {
+    for (const b of $(bar).querySelectorAll("button[data-pane]")) b.classList.toggle("active", b.dataset.pane === pane);
+    for (const p of panes) $(prefix + p).classList.toggle("active", p === pane);
+    remember(key, pane);
+  };
+  $(bar).addEventListener("click", (e) => { if (e.target.dataset.pane) pick(e.target.dataset.pane); });
+  pick(panes.includes(recall(key, "")) ? recall(key, "") : panes[0]);
+  return pick;
+}
 
 // ------------------------------------------------------------ permission
 const permitQueue = [];
 function askPermission(ev) {
+  if (permitQueue.some((q) => q.id === ev.id)) return;     // asked again on rejoining a run
   permitQueue.push(ev);
   if (permitQueue.length === 1) nextPermission();
+}
+// Answered (here or on another page), or it timed out: stop asking.
+function dropPermission(id) {
+  const i = permitQueue.findIndex((q) => q.id === id);
+  if (i > 0) permitQueue.splice(i, 1);
+  else if (i === 0) { permitQueue[0].gone = true; $("permit").close(); }
 }
 function nextPermission() {
   const ev = permitQueue[0];
@@ -145,11 +175,353 @@ function nextPermission() {
   dlg.onclose = async () => {
     const allow = dlg.returnValue === "allow";
     permitQueue.shift();
-    try { await api("POST", "/api/permit", { id: ev.id, allow }); } catch (e) { toast(e.message, true); }
+    if (!ev.gone) {
+      try { await api("POST", "/api/permit", { id: ev.id, allow }); } catch (e) { toast(e.message, true); }
+    }
     nextPermission();
   };
   dlg.showModal();
 }
+
+// =================================================================== chat
+// A conversation: no tools unless a message starts with command lines. Pins stay in
+// every prompt; a thread (the panel on the right) has only its message's context;
+// rewinding clears everything after a message. Replies run as background jobs, so a
+// reload picks them up again.
+let chat = null;            // the open chat, as the server returns it
+let chatThread = 0;         // the message whose thread is open; 0 = none
+let chatPending = null;     // the reply streaming in: {thread, text, node}
+let chatHelp = { commands: [], tools: [] };
+
+async function loadChats() {
+  try {
+    const data = await api("GET", "/api/chats");
+    chatHelp = { commands: data.commands, tools: data.tools };
+    renderChatHelp();
+    $("chat-list").replaceChildren(...data.chats.map((c) =>
+      el("li", { class: "item" + (chat && c.id === chat.id ? " active" : ""), onclick: () => openChat(c.id) },
+        el("div", { class: "grow" },
+          el("span", { text: c.title }),
+          el("span", { class: "sub", text: `${c.messages} message(s) · ${when(c.updated)}` })),
+        el("button", { class: "small link", text: "✕", title: "delete this chat",
+                       onclick: (e) => { e.stopPropagation(); deleteChat(c.id, c.title); } }))));
+    if (!data.chats.length) $("chat-list").append(el("li", { class: "muted", text: "no chats yet" }));
+    if (!chat) {
+      const last = recall("sh-chat", "");
+      const pick = data.chats.find((c) => c.id === last) || data.chats[0];
+      if (pick) openChat(pick.id); else renderChat();
+    }
+  } catch (e) { toast(e.message, true); }
+}
+loaders.chat = loadChats;
+async function openChat(id) {
+  try {
+    const c = await api("GET", `/api/chats/${id}`);
+    if (!chat || chat.id !== c.id) chatThread = 0;
+    chat = c;
+    remember("sh-chat", c.id);
+    renderChat();
+    loadChats();
+  } catch (e) { toast(e.message, true); remember("sh-chat", ""); }
+}
+async function newChat() {
+  try { chat = await api("POST", "/api/chats"); chatThread = 0; renderChat(); loadChats(); $("chat-input").focus(); }
+  catch (e) { toast(e.message, true); }
+}
+async function deleteChat(id, title) {
+  if (live && live.kind === "chat" && live.target === id) { toast("the model is answering in this chat", true); return; }
+  if (!confirm(`Delete the chat “${title}”?`)) return;
+  try {
+    await api("DELETE", `/api/chats/${id}`);
+    if (chat && chat.id === id) { chat = null; chatThread = 0; renderChat(); }
+    toast("chat deleted");
+    loadChats();
+  } catch (e) { toast(e.message, true); }
+}
+$("chat-new").addEventListener("click", newChat);
+$("chat-delete").addEventListener("click", () => { if (chat) deleteChat(chat.id, chat.title); });
+$("chat-title").addEventListener("change", async () => {
+  const title = $("chat-title").value.trim();
+  if (!chat || !title) return;
+  try { chat = await api("PUT", `/api/chats/${chat.id}`, { title }); loadChats(); } catch (e) { toast(e.message, true); }
+});
+
+// ------------------------------------------------------------- showing
+const chatLine = (thread) => (chat ? chat.messages.filter((m) => m.thread === thread) : []);
+function who(m) {
+  if (m.role === "user") return "you";
+  if (m.role === "assistant") return { research: "research", plan: "plan", agent: "model + tools" }[m.kind] || "model";
+  return { info: "help", error: "error", note: "notes", recall: "recall", plan: "plan run", recipe: "recipe",
+           research: "excerpts" }[m.kind] || "tool";
+}
+// A user message: its command lines in red, the question after them.
+function userText(text) {
+  const box = el("div", { class: "cmsg-text" });
+  let commands = true;
+  for (const line of text.split("\n")) {
+    if (commands && line.startsWith("/")) box.append(el("code", { class: "cmd", text: line }), "\n");
+    else { commands = false; box.append(line + "\n"); }
+  }
+  box.lastChild && box.lastChild.nodeType === 3 && (box.lastChild.textContent = box.lastChild.textContent.replace(/\n$/, ""));
+  return box;
+}
+function chatBody(m) {
+  if (m.role === "user") return [userText(m.text)];
+  if (m.kind === "tool") {
+    const args = Object.entries(m.meta.args || {}).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" ");
+    const cls = "tool" + (m.meta.tool && m.meta.tool.startsWith("risky_") ? " risky" : "") + (m.meta.ok ? "" : " failed");
+    return [el("details", { class: cls },
+      el("summary", { text: `${m.meta.tool} ${args}${m.meta.denied ? " · denied" : m.meta.ok ? "" : " · failed"}` }),
+      el("pre", { text: m.text }))];
+  }
+  if (m.kind === "info") return [el("details", { class: "tool", open: true }, el("summary", { text: "commands and tools" }),
+                                   el("pre", { text: m.text }))];
+  const out = [el("div", { class: "cmsg-text", text: m.text })];
+  if (m.meta.refs && m.meta.refs.length) {
+    out.push(el("div", { class: "refs" }, "refs ", ...m.meta.refs.map((r) =>
+      el("span", { title: r.text, text: `[${r.num}] ${r.source}:${r.line}  ` }))));
+  }
+  const steps = (m.meta.steps || []).filter((x) => x.role === "tool");
+  if (steps.length) {
+    out.push(el("details", { class: "tool" },
+      el("summary", { text: `used ${steps.length} tool call(s): kept here, not in the context` }),
+      el("pre", { text: (m.meta.steps || []).map((x) => (x.role === "tool" ? "└ " : "▸ ") + x.text).join("\n") })));
+  }
+  if (m.meta.plan) {
+    out.push(el("div", { class: "cmsg-foot" }, el("button", { class: "small link", text: `open plan ${m.meta.plan} in the planner`,
+      onclick: () => { show("planner"); openPlan(m.meta.plan); } })));
+  }
+  return out;
+}
+function chatCard(m, inThread) {
+  const acts = [];
+  if (!inThread && !m.thread) acts.push(el("button", { class: "small link", text: "reply", title: "answer this message in a thread: only its context",
+                                                       onclick: () => openThread(m.num) }));
+  if (m.seen) acts.push(el("button", { class: "small link", text: m.pinned ? "unpin" : "pin",
+                                       title: m.pinned ? "stop keeping it in every prompt" : "keep it in every later prompt, threads too (CAG)",
+                                       onclick: () => pinMessage(m.num, !m.pinned) }));
+  if (m.role === "user") acts.push(el("button", { class: "small link", text: "edit", title: "clear from here on and put this message back in the box",
+                                                  onclick: () => editMessage(m) }));
+  acts.push(el("button", { class: "small link", text: "rewind here", title: "clear everything after this message",
+                           onclick: () => rewindTo(m) }));
+  const replies = !inThread && chat.threads[m.num];
+  return el("div", { class: `cmsg ${m.role} ${m.kind}` + (m.pinned ? " pinned" : "") + (m.seen ? "" : " outside"), id: `cmsg-${m.num}` },
+    el("div", { class: "cmsg-head" },
+      el("span", { class: "cmsg-num", text: `#${m.num}` }), el("span", { class: "who", text: who(m) }),
+      m.pinned ? el("span", { class: "pin-mark", text: "pinned" }) : null,
+      m.seen ? null : el("span", { text: "not in the context" }),
+      el("span", { class: "grow" }), el("span", { class: "cmsg-actions" }, ...acts)),
+    ...chatBody(m),
+    replies ? el("div", { class: "cmsg-foot" }, el("button", { class: "small secondary", text: `${replies} in thread`,
+                                                               onclick: () => openThread(m.num) })) : null);
+}
+function renderChat() {
+  const has = !!chat;
+  $("chat-title").value = has ? (chat.title === "New chat" && !chat.messages.length ? "" : chat.title) : "";
+  $("chat-title").disabled = !has;
+  $("chat-delete").hidden = !has;
+  const box = $("chat-messages");
+  box.replaceChildren(...chatLine(0).map((m) => chatCard(m, false)));
+  if (!has || !chat.messages.length) {
+    box.append(el("div", { class: "msg notice placeholder",
+      text: "Talk with the model. It has no tools: start a message with a command line (/read, /ask, /agent …) to bring one in." }));
+  }
+  const summary = has && chat.summaries["0"];
+  $("chat-summary").hidden = !summary;
+  if (summary) $("chat-summary").querySelector("pre").textContent = summary;
+  const last = chatLine(0).filter((m) => m.meta.context).pop();
+  $("chat-meter").textContent = last ? `context ${Math.round(100 * last.meta.context.tokens / last.meta.context.budget)}%` : "";
+  renderPins();
+  renderThread();
+  if (chatPending) pendingNode();
+  box.scrollTop = box.scrollHeight;
+}
+function renderPins() {
+  const pins = chat ? chat.messages.filter((m) => m.pinned) : [];
+  $("chat-pins").hidden = !pins.length;
+  $("chat-pins").replaceChildren(
+    el("div", { class: "attached-head", text: `Pinned: in every prompt (${pins.length})` }),
+    ...pins.map((m) => el("div", { class: "attached-item" },
+      el("a", { href: "#", class: "grow", title: m.text, text: `#${m.num} ${m.text.split("\n")[0].slice(0, 90)}`,
+                onclick: (e) => { e.preventDefault(); focusMessage(m); } }),
+      el("button", { class: "small link", text: "unpin", onclick: () => pinMessage(m.num, false) }))));
+}
+function focusMessage(m) {
+  if (m.thread && m.thread !== chatThread) openThread(m.thread);
+  const node = $(`cmsg-${m.num}`);
+  if (!node) return;
+  node.scrollIntoView({ block: "center" });
+  node.classList.add("focus");
+  setTimeout(() => node.classList.remove("focus"), 1500);
+}
+function openThread(num) {
+  chatThread = num;
+  renderChat();
+  $("thread-input").focus();
+}
+function renderThread() {
+  const root = chat && chatThread ? chat.messages.find((m) => m.num === chatThread) : null;
+  if (chatThread && !root) chatThread = 0;
+  $("chat-thread").hidden = !root;
+  $("chat-layout").classList.toggle("threaded", !!root);
+  if (!root) return;
+  $("thread-title").textContent = `Thread on #${root.num}`;
+  const summary = chat.summaries[String(root.num)];
+  $("thread-summary").hidden = !summary;
+  if (summary) $("thread-summary").querySelector("pre").textContent = summary;
+  const box = $("thread-messages");
+  box.replaceChildren(chatCard(root, true), ...chatLine(root.num).map((m) => chatCard(m, true)));
+  box.scrollTop = box.scrollHeight;
+}
+$("thread-close").addEventListener("click", () => { chatThread = 0; renderChat(); });
+function renderChatHelp() {
+  const rows = chatHelp.commands.map((c) => el("tr", {}, el("td", {}, el("code", { text: c.usage })), el("td", { text: c.about })));
+  rows.push(el("tr", {}, el("td", {}, el("code", { text: "/TOOL_NAME ARGS" })),
+                el("td", { text: "any tool by its own name: " + chatHelp.tools.join(", ") })));
+  $("chat-commands").replaceChildren(...rows);
+}
+
+// ------------------------------------------------------ pins and rewind
+async function pinMessage(num, pinned) {
+  try { chat = await api("PUT", `/api/chats/${chat.id}/messages/${num}/pin`, { pinned }); renderChat(); }
+  catch (e) { toast(e.message, true); }
+}
+async function rewind(to, thread, what) {
+  try {
+    chat = await api("POST", `/api/chats/${chat.id}/rewind`, { to, thread });
+    renderChat();
+    loadChats();
+    toast(`${chat.cleared} message(s) cleared` + (what ? `: ${what}` : ""));
+  } catch (e) { toast(e.message, true); }
+}
+function rewindTo(m) {
+  const where = m.thread ? `the thread on #${m.thread}` : "the chat (its threads too)";
+  if (!confirm(`Clear everything in ${where} after #${m.num}? Answers, pins and context after it go.`)) return;
+  rewind(m.num, m.thread);
+}
+// Edit: clear this message and everything after it, and put its text back in the box.
+function editMessage(m) {
+  const earlier = (m.thread ? chatLine(m.thread) : chatLine(0)).filter((x) => x.num < m.num).map((x) => x.num);
+  const to = earlier.length ? earlier[earlier.length - 1] : (m.thread || 0);
+  if (!confirm(`Clear #${m.num} and everything after it, to edit it?`)) return;
+  const input = m.thread ? $("thread-input") : $("chat-input");
+  rewind(to, m.thread, "edit it and send again").then(() => { input.value = m.text; input.focus(); });
+}
+
+// -------------------------------------------------------------- sending
+async function sendChat(text, thread) {
+  if (running || !text.trim()) return;
+  if (!chat) {
+    try { chat = await api("POST", "/api/chats"); } catch (e) { toast(e.message, true); return; }
+  }
+  const cid = chat.id;
+  return followChat(cid, (cb) => stream(`/api/chats/${cid}/send`, { text, thread }, cb));
+}
+async function joinChat(job, reveal) {
+  setRunning(true);
+  if (reveal) show("chat");
+  await openChat(job.target);
+  setRunning(false);
+  followChat(job.target, (cb) => stream(`/api/jobs/${job.id}/events?since=0`, undefined, cb));
+}
+// The pane a thread's messages show in: the thread panel if it is open, else the chat.
+const chatPane = (thread) => (thread && thread === chatThread ? $("thread-messages") : thread ? null : $("chat-messages"));
+function pendingNode() {
+  const pane = chatPane(chatPending.thread);
+  if (!pane) return null;
+  if (!chatPending.node || !chatPending.node.isConnected) {
+    for (const p of pane.querySelectorAll(".placeholder")) p.remove();
+    chatPending.node = el("div", { class: "cmsg assistant pending" },
+      el("div", { class: "cmsg-head" }, el("span", { class: "who", text: "model" })),
+      el("div", { class: "cmsg-text", text: chatPending.text || "…" }));
+    pane.append(chatPending.node);
+  }
+  return chatPending.node;
+}
+function chatNotice(text, thread) {
+  const pane = chatPane(thread);
+  if (pane) { pane.append(el("div", { class: "msg notice", text })); pane.scrollTop = pane.scrollHeight; }
+}
+async function followChat(cid, first) {
+  live = { id: null, kind: "chat", target: cid };
+  setRunning(true);
+  setBusy("answering in chat");
+  let thread = 0;
+  const here = () => chat && chat.id === cid;
+  const error = await followJob(first, (ev) => {
+    if (ev.type === "message") {
+      thread = ev.message.thread;
+      chatPending = null;
+      if (!here()) return;
+      chat.messages = chat.messages.filter((m) => m.num !== ev.message.num).concat([ev.message]).sort((a, b) => a.num - b.num);
+      if (ev.message.thread) chat.threads[ev.message.thread] = chatLine(ev.message.thread).length;
+      renderChat();
+    } else if (ev.type === "text") {
+      if (!chatPending) chatPending = { thread, text: "", node: null };
+      chatPending.text += ev.text;
+      const node = here() && pendingNode();
+      if (node) { node.querySelector(".cmsg-text").textContent = chatPending.text; node.parentNode.scrollTop = node.parentNode.scrollHeight; }
+    } else if (ev.type === "notice" || ev.type === "status") { if (here()) chatNotice(ev.text, thread); }
+    else if (ev.type === "tool_call") { if (here()) chatNotice(`running ${ev.name}`, thread); }
+    else if (ev.type === "done") { if (here()) chat = ev.chat; renderState(ev.state); }
+    else if (ev.type === "stopped") { if (here()) chatNotice("stopped", thread); renderState(ev.state); }
+  });
+  chatPending = null;
+  live = null;
+  setRunning(false);
+  if (error) toast(error, true);
+  if (here()) await openChat(cid); else loadChats();
+  refreshState();
+  loadRelics();
+}
+function composer(form, input, thread) {
+  $(form).addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = $(input).value.trim();
+    if (!text || running) return;
+    $(input).value = "";
+    hideSuggest();
+    sendChat(text, thread());
+  });
+  $(input).addEventListener("keydown", (e) => {
+    if (e.key === "Tab" && !$("chat-suggest").hidden && input === "chat-input") { e.preventDefault(); takeSuggestion(0); return; }
+    if (e.key === "Escape") hideSuggest();
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $(form).requestSubmit(); }
+  });
+}
+composer("chat-form", "chat-input", () => 0);
+composer("thread-form", "thread-input", () => chatThread);
+
+// Command suggestions: typing "/" at the start of a line lists the commands that match.
+function currentLine() {
+  const t = $("chat-input"), before = t.value.slice(0, t.selectionStart);
+  const start = before.lastIndexOf("\n") + 1;
+  return { start, word: before.slice(start) };
+}
+function suggestions() {
+  const { word } = currentLine();
+  if (!/^\/[\w-]*$/.test(word)) return [];
+  const all = chatHelp.commands.map((c) => ({ name: c.name, about: c.usage }))
+    .concat(chatHelp.tools.map((t) => ({ name: t, about: "tool" })));
+  return all.filter((c) => ("/" + c.name).startsWith(word)).slice(0, 8);
+}
+function hideSuggest() { $("chat-suggest").hidden = true; }
+function takeSuggestion(i) {
+  const pick = suggestions()[i];
+  if (!pick) return hideSuggest();
+  const t = $("chat-input"), { start } = currentLine();
+  t.setRangeText(`/${pick.name} `, start, t.selectionStart, "end");
+  hideSuggest();
+  t.focus();
+}
+$("chat-input").addEventListener("input", () => {
+  const list = suggestions();
+  $("chat-suggest").hidden = !list.length;
+  $("chat-suggest").replaceChildren(...list.map((c, i) =>
+    el("div", { class: i ? "" : "active", onmousedown: (e) => { e.preventDefault(); takeSuggestion(i); } },
+      el("strong", { text: "/" + c.name }), el("span", { text: c.about }))));
+});
+$("chat-input").addEventListener("blur", () => setTimeout(hideSuggest, 100));
 
 // =============================================================== research
 let research = null;   // the session as the server returns it
@@ -331,7 +703,8 @@ function renderNotes(r) {
   const notes = r.library.filter(isNote);
   $("notes").replaceChildren(...notes.map((x) => el("li", { class: scoped.has(x.source) ? "active" : "" },
     scopeBox(x, scoped),
-    el("a", { href: "#", class: "grow", text: x.title, onclick: (e) => { e.preventDefault(); openNoteById(x.source.slice(5)); } }))));
+    el("a", { href: "#", class: "grow", text: x.title, title: "open in Notes",
+              onclick: (e) => { e.preventDefault(); show("notes"); openNoteById(x.source.slice(5)); } }))));
   if (!notes.length) $("notes").append(el("li", { class: "muted", text: "no notes yet" }));
 }
 async function setScope(source, on) {
@@ -388,58 +761,6 @@ $("upload").addEventListener("change", async (e) => {
   refreshState();
 });
 
-// the note editor: a dialog, so the research page stays uncluttered
-let noteId = null, noteDirty = false;
-async function openNoteById(id) {
-  try { openNote(await api("GET", `/api/notes/${id}`)); } catch (e) { toast(e.message, true); }
-}
-function openNote(n) {
-  noteId = n ? n.id : null;
-  $("note-text").value = n ? n.text : "";
-  $("note-title").textContent = n ? `[${n.id}] ${n.title}` : "New note";
-  $("note-meta").textContent = n ? "saved " + when(n.mtime) : "";
-  $("note-delete").hidden = !n;
-  $("note-status").textContent = "";
-  noteDirty = false;
-  const dlg = $("note-dialog");
-  if (!dlg.open) dlg.showModal();
-  $("note-text").focus();
-}
-function closeNote() {
-  if (noteDirty && !confirm("Discard unsaved changes?")) return;
-  noteDirty = false;
-  $("note-dialog").close();
-}
-$("note-new").addEventListener("click", () => openNote(null));
-$("note-close").addEventListener("click", closeNote);
-$("note-dialog").addEventListener("cancel", (e) => { e.preventDefault(); closeNote(); });   // Escape
-$("note-text").addEventListener("input", () => { noteDirty = true; $("note-status").textContent = "unsaved"; });
-$("note-text").addEventListener("keydown", (e) => {
-  if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveNote(); }
-});
-async function saveNote() {
-  const text = $("note-text").value;
-  if (!text.trim()) { toast("a note needs some text", true); return; }
-  try {
-    const n = noteId ? await api("PUT", `/api/notes/${noteId}`, { text }) : await api("POST", "/api/notes", { text });
-    noteDirty = false;
-    openNote(n);
-    $("note-status").textContent = "saved and indexed";
-    loadResearch();
-  } catch (e) { toast(e.message, true); }
-}
-$("note-save").addEventListener("click", saveNote);
-$("note-delete").addEventListener("click", async () => {
-  if (!noteId || !confirm(`Delete note ${noteId}?`)) return;
-  try {
-    await api("DELETE", `/api/notes/${noteId}`);
-    noteDirty = false;
-    $("note-dialog").close();
-    toast("deleted");
-    loadResearch();
-  } catch (e) { toast(e.message, true); }
-});
-
 // ----------------------------------------------------------- bibliography
 let refShown = null;
 function renderRefs(r) {
@@ -462,15 +783,87 @@ function openRef(num) {
   renderRefs(research);
 }
 
+// ================================================================== notes
+let noteId = null, noteDirty = false, noteTag = "", noteTimer;
+async function loadNotes() {
+  try {
+    const q = $("note-q").value.trim();
+    const data = await api("GET", "/api/notes?" + new URLSearchParams({ q, tag: noteTag }));
+    if (noteTag && !data.tags.some(([t]) => t === noteTag)) { noteTag = ""; return loadNotes(); }
+    $("note-tags").replaceChildren(...data.tags.map(([t, n]) => el("button", {
+      class: "chip" + (t === noteTag ? " active" : ""), text: `#${t} ${n}`, title: t === noteTag ? "show every note" : "only notes tagged #" + t,
+      onclick: () => { noteTag = noteTag === t ? "" : t; loadNotes(); } })));
+    $("note-list").replaceChildren(...data.notes.map((n) =>
+      el("li", { class: String(n.id) === String(noteId) ? "active" : "", onclick: () => openNoteById(n.id) },
+        el("span", { text: n.title }),
+        el("span", { class: "sub", text: n.snippet || `[${n.id}] · ${when(n.mtime)}` }),
+        n.tags.length ? el("span", { class: "tags", text: n.tags.map((t) => "#" + t).join(" ") }) : null)));
+    if (!data.notes.length) $("note-list").append(el("li", { class: "muted", text: q || noteTag ? "nothing matches" : "no notes yet" }));
+  } catch (e) { toast(e.message, true); }
+}
+loaders.notes = loadNotes;
+async function openNoteById(id) {
+  if (noteDirty && String(id) !== String(noteId) && !confirm("Discard unsaved changes?")) return;
+  try { openNote(await api("GET", `/api/notes/${id}`)); } catch (e) { toast(e.message, true); }
+}
+function openNote(n) {
+  noteId = n ? n.id : null;
+  $("note-text").value = n ? n.text : "";
+  $("note-title").textContent = n ? `[${n.id}] ${n.title}` : "New note";
+  $("note-meta").textContent = n ? "saved " + when(n.mtime) : "";
+  $("note-delete").hidden = !n;
+  $("note-status").textContent = "";
+  noteDirty = false;
+  $("note-text").focus();
+  loadNotes();
+}
+function newNote() {
+  if (noteDirty && !confirm("Discard unsaved changes?")) return;
+  noteDirty = false;
+  openNote(null);
+}
+$("note-new").addEventListener("click", newNote);
+$("research-note-new").addEventListener("click", () => { show("notes"); newNote(); });
+$("note-q").addEventListener("input", () => { clearTimeout(noteTimer); noteTimer = setTimeout(loadNotes, 250); });
+$("note-text").addEventListener("input", () => { noteDirty = true; $("note-status").textContent = "unsaved"; });
+$("note-text").addEventListener("keydown", (e) => {
+  if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveNote(); }
+});
+async function saveNote() {
+  const text = $("note-text").value;
+  if (!text.trim()) { toast("a note needs some text", true); return; }
+  try {
+    const n = noteId ? await api("PUT", `/api/notes/${noteId}`, { text }) : await api("POST", "/api/notes", { text });
+    noteDirty = false;
+    openNote(n);
+    $("note-status").textContent = "saved and indexed";
+    loadResearch();
+  } catch (e) { toast(e.message, true); }
+}
+$("note-save").addEventListener("click", saveNote);
+$("note-delete").addEventListener("click", async () => {
+  if (!noteId || !confirm(`Delete note ${noteId}?`)) return;
+  try {
+    await api("DELETE", `/api/notes/${noteId}`);
+    noteDirty = false;
+    openNote(null);
+    toast("deleted");
+    loadResearch();
+  } catch (e) { toast(e.message, true); }
+});
+
 // ================================================================ planner
 let plan = null;
 async function loadPlans() {
   try {
     const data = await api("GET", "/api/plans");
     $("plan-list").replaceChildren(...data.plans.map((p) =>
-      el("li", { class: plan && p.id === plan.id ? "active" : "", onclick: () => openPlan(p.id) },
-        el("span", { text: p.goal }),
-        el("span", { class: "sub", text: `${p.id} · ${p.done}/${p.tasks} done${p.finished ? " · finished" : ""}` }))));
+      el("li", { class: "item" + (plan && p.id === plan.id ? " active" : ""), onclick: () => openPlan(p.id) },
+        el("div", { class: "grow" },
+          el("span", { text: p.goal }),
+          el("span", { class: "sub", text: `${p.id} · ${p.done}/${p.tasks} done${p.finished ? " · finished" : ""}` })),
+        el("button", { class: "small link", text: "✕", title: "delete this plan",
+                       onclick: (e) => { e.stopPropagation(); deletePlan(p.id, p.goal); } }))));
     if (!data.plans.length) $("plan-list").append(el("li", { class: "muted", text: "no plans yet" }));
     if (!plan && data.current) openPlan(data.current);
   } catch (e) { toast(e.message, true); }
@@ -479,7 +872,7 @@ loaders.planner = loadPlans;
 async function openPlan(id, keepLog = false) {
   try {
     renderPlan(await api("GET", `/api/plans/${id}`));
-    if (!keepLog) $("run-log").replaceChildren();
+    if (!keepLog) ownLog($("run-log"), id);
     loadPlans();
   } catch (e) { toast(e.message, true); }
 }
@@ -492,6 +885,9 @@ function renderPlan(p) {
   $("plan-tasks").replaceChildren(...p.tasks.map((t) =>
     el("li", {},
       el("div", { class: "head" },
+        el("input", { type: "checkbox", class: "tick", checked: t.status === "done", disabled: running || t.status === "running",
+                      title: t.status === "done" ? "untick: the next run does this step again" : "tick: mark this step done",
+                      onchange: (e) => markSteps([t.num], e.target.checked) }),
         el("strong", { text: `${t.num}.` }), el("span", { text: t.task }),
         el("span", { class: "tool-name", text: t.tool }),
         t.after.length ? el("span", { class: "muted", text: `after ${t.after.join(", ")}` }) : null,
@@ -501,6 +897,31 @@ function renderPlan(p) {
       t.detail ? el("div", { class: "detail", text: t.detail }) : null,
       t.result ? el("div", { class: "result", text: "→ " + t.result }) : null)));
 }
+async function markSteps(steps, done) {
+  if (!plan) return;
+  try { renderPlan(await api("PUT", `/api/plans/${plan.id}/steps`, { steps, done })); loadPlans(); }
+  catch (e) { toast(e.message, true); openPlan(plan.id, true); }
+}
+$("plan-untick").addEventListener("click", () => {
+  if (plan && confirm("Untick every step? The next run does them all again.")) markSteps(null, false);
+});
+async function deletePlan(id, goal) {
+  if (running && plan && plan.id === id) { toast("this plan is running; wait for the run to end", true); return; }
+  if (!confirm(`Delete the plan “${goal}”? Files its runs wrote stay.`)) return;
+  try {
+    await api("DELETE", `/api/plans/${id}`);
+    if (plan && plan.id === id) {
+      plan = null;
+      $("plan-detail").hidden = true;
+      $("plan-editor").hidden = true;
+      $("plan-empty").hidden = false;
+      $("run-log").replaceChildren();
+    }
+    toast("plan deleted");
+    loadPlans();
+  } catch (e) { toast(e.message, true); }
+}
+$("plan-delete").addEventListener("click", () => { if (plan) deletePlan(plan.id, plan.goal); });
 $("plan-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const goal = $("plan-goal").value.trim();
@@ -558,32 +979,105 @@ $("plan-edit-save").addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 
-// A streamed run written into a log: what every run shares (streamed text, tool calls
-// and results, notices, Stop, errors, the busy state); `onEvent` gets the run's own.
-async function runInLog({ url, body, log, button, busy, onEvent }) {
-  if (running) return;
-  running = true;
-  button.disabled = true;
+// ================================================================== runs
+// Plan runs, expansions and recipe runs work on the server in the background. The page
+// follows a run by its events; if the connection drops (a reload, a phone that put the
+// browser to sleep) it joins again where it left off, and a page opened later (or on
+// another device) joins from the start. RUNS[kind] has what each kind adds.
+let live = null;                       // the run this page follows: {id, kind, target}
+const RUNS = {};
+function setRunning(on) {
+  running = on;
+  for (const id of ["run-btn", "expand-btn", "recipe-run", "chat-send", "thread-send"]) $(id).disabled = on;
+}
+const runLog = (kind) => $(kind === "recipe" ? "recipe-log" : "run-log");
+// A log belongs to the plan or recipe its run worked on: hidden while another one is
+// open during the run, and cleared when another one is opened after it.
+function ownLog(log, shown) {
+  const owner = log.dataset.owner;
+  if (!owner || owner === shown) { log.hidden = false; return; }
+  if (live && live.target === owner && runLog(live.kind) === log) { log.hidden = true; return; }
   log.replaceChildren();
-  setBusy(busy);
+  delete log.dataset.owner;
+  log.hidden = false;
+}
+function startRun(kind, target, url, body) {
+  if (running) return;
+  return followRun(kind, target, (cb) => stream(url, body, cb));
+}
+async function joinRun(job, reveal) {
+  if (running) return;
+  if (job.kind === "chat") return joinChat(job, reveal);
+  setRunning(true);                    // claimed, so the next state check does not join twice
+  if (reveal) show(job.kind === "recipe" ? "recipes" : "planner");
+  if (job.kind === "recipe") await openRecipe(job.target); else await openPlan(job.target);
+  setRunning(false);
+  followRun(job.kind, job.target, (cb) => stream(`/api/jobs/${job.id}/events?since=0`, undefined, cb));
+}
+// Waits until the page is visible again (a sleeping phone cannot connect), then a little.
+function rejoinDelay(tries) {
+  return new Promise((ok) => {
+    const go = () => {
+      if (document.hidden) return;
+      document.removeEventListener("visibilitychange", go);
+      setTimeout(ok, Math.min(500 * tries, 5000));
+    };
+    document.addEventListener("visibilitychange", go);
+    go();
+  });
+}
+// Follows a background job until it ends, joining it again where it left off if the
+// connection drops. `first` opens the stream; onEvent gets each event but the job's own.
+// Resolves with an error to show, or "".
+async function followJob(first, onEvent) {
+  let id = null, seq = -1, tries = 0, open = first;
+  const each = (ev) => {
+    if (ev.type === "job") { id = ev.id; if (live) live.id = id; return; }
+    seq = ev.seq;
+    tries = 0;
+    onEvent(ev);
+  };
+  for (;;) {
+    try {
+      const last = await open(each);
+      if (last && (last.type === "done" || last.type === "stopped")) return "";
+    } catch (e) {
+      if (e.server) return e.message;
+    }
+    if (!id || ++tries > 20) return "lost the connection to the run";
+    await rejoinDelay(tries);
+    open = (cb) => stream(`/api/jobs/${id}/events?since=${seq + 1}`, undefined, cb);
+  }
+}
+// What every run shares (streamed text, tool calls and results, notices, Stop, errors,
+// the busy state); RUNS[kind].onEvent gets the run's own events.
+async function followRun(kind, target, first) {
+  const r = RUNS[kind], log = runLog(kind);
+  live = { id: null, kind, target };
+  setRunning(true);
+  setBusy(r.busy);
+  log.replaceChildren();
+  log.dataset.owner = target;
+  log.hidden = false;
   let text = null;
-  try {
-    const last = await stream(url, body, (ev) => {
-      if (ev.type === "text") {
-        if (!text) { text = el("div"); log.append(text); }
-        text.textContent += ev.text;
-      } else if (ev.type === "text_end") text = null;
-      else if (ev.type === "tool_call") { text = null; logLine(`  ▸ ${ev.name}(${JSON.stringify(ev.args).slice(0, 160)})`, "", log); }
-      else if (ev.type === "tool_result") logLine("    └ " + ev.text.split("\n").slice(0, 3).join(" ⏎ ").slice(0, 240), ev.ok ? "ev-dim" : "ev-bad", log);
-      else if (ev.type === "notice" || ev.type === "status") logLine("· " + ev.text, "ev-dim", log);
-      else if (ev.type === "stopped") { logLine("■ stopped", "ev-bad", log); renderState(ev.state); }
-      else if (ev.type !== "stats" && ev.type !== "loaded") { text = null; onEvent(ev); }
-    });
-    if (!last) logLine("the connection closed early", "ev-bad", log);
-  } catch (e) { logLine(e.message, "ev-bad", log); }
-  running = false;
-  button.disabled = false;
+  const onEvent = (ev) => {
+    if (ev.type === "text") {
+      if (!text) { text = el("div"); log.append(text); }
+      text.textContent += ev.text;
+    } else if (ev.type === "text_end") text = null;
+    else if (ev.type === "tool_call") { text = null; logLine(`  ▸ ${ev.name}(${JSON.stringify(ev.args).slice(0, 160)})`, "", log); }
+    else if (ev.type === "tool_result") logLine("    └ " + ev.text.split("\n").slice(0, 3).join(" ⏎ ").slice(0, 240), ev.ok ? "ev-dim" : "ev-bad", log);
+    else if (ev.type === "notice" || ev.type === "status") logLine("· " + ev.text, "ev-dim", log);
+    else if (ev.type === "stopped") { logLine("■ stopped", "ev-bad", log); renderState(ev.state); }
+    else if (ev.type !== "stats" && ev.type !== "loaded") { text = null; r.onEvent(ev, log); }
+  };
+  const error = await followJob(first, onEvent);
+  if (error) logLine(error, "ev-bad", log);
+  live = null;
+  setRunning(false);
   refreshState();
+  loadRelics();
+  r.after();
 }
 function logLine(text, cls = "", log = $("run-log")) {
   log.append(el("div", { class: cls, text }));
@@ -595,33 +1089,34 @@ function stepNumbers(text) {
 }
 $("expand-btn").addEventListener("click", async () => {
   if (!plan) return;
-  const log = $("run-log");
   const body = { steps: stepNumbers($("expand-steps").value), times: Number($("expand-times").value) || 1,
                  parallel: $("expand-parallel").checked };
-  await runInLog({ url: `/api/plans/${plan.id}/expand`, body, log, button: $("expand-btn"), busy: "expanding the plan",
-    onEvent: (ev) => {
-      if (ev.type === "step") logLine(`  ✓ step ${ev.num}: pass ${ev.depth}`, "ev-ok", log);
-      else if (ev.type === "done") { logLine("■ expanded", "ev-task", log); renderPlan(ev.plan); renderState(ev.state); }
-    } });
-  if (plan) openPlan(plan.id, true);
+  await startRun("expand", plan.id, `/api/plans/${plan.id}/expand`, body);
 });
+// A plan shown is redrawn from the run's events only if it is the plan the run is on.
+const showRunPlan = (p) => { if (plan && plan.id === p.id) renderPlan(p); };
+const afterPlanRun = () => { if (plan) openPlan(plan.id, true); else loadPlans(); };
+RUNS.expand = { busy: "expanding the plan", after: afterPlanRun,
+  onEvent: (ev, log) => {
+    if (ev.type === "step") logLine(`  ✓ step ${ev.num}: pass ${ev.depth}`, "ev-ok", log);
+    else if (ev.type === "done") { logLine("■ expanded", "ev-task", log); showRunPlan(ev.plan); renderState(ev.state); }
+  } };
 $("run-btn").addEventListener("click", async () => {
   if (!plan) return;
-  const log = $("run-log");
   const body = { mode: $("run-mode").value, parallel: $("run-parallel").checked };
-  await runInLog({ url: `/api/plans/${plan.id}/run`, body, log, button: $("run-btn"), busy: "running the plan",
-    onEvent: (ev) => {
-      if (ev.type === "task_start") logLine(`▶ step ${ev.num}: ${ev.task} [${ev.tool}]`, "ev-task", log);
-      else if (ev.type === "task_end") {
-        logLine(`  ${ev.status.toUpperCase()}: ${ev.result}`, ev.status === "done" ? "ev-ok" : "ev-bad", log);
-        renderPlan(ev.plan);
-      } else if (ev.type === "done") {
-        logLine(`■ ${ev.reason}`, "ev-task", log);
-        renderPlan(ev.plan); renderState(ev.state);
-      }
-    } });
-  if (plan) openPlan(plan.id, true);
+  await startRun("run", plan.id, `/api/plans/${plan.id}/run`, body);
 });
+RUNS.run = { busy: "running the plan", after: afterPlanRun,
+  onEvent: (ev, log) => {
+    if (ev.type === "task_start") logLine(`▶ step ${ev.num}: ${ev.task} [${ev.tool}]`, "ev-task", log);
+    else if (ev.type === "task_end") {
+      logLine(`  ${ev.status.toUpperCase()}: ${ev.result}`, ev.status === "done" ? "ev-ok" : "ev-bad", log);
+      showRunPlan(ev.plan);
+    } else if (ev.type === "done") {
+      logLine(`■ ${ev.reason}`, "ev-task", log);
+      showRunPlan(ev.plan); renderState(ev.state);
+    }
+  } };
 
 // ================================================================ recipes
 let recipe = null;
@@ -629,9 +1124,12 @@ async function loadRecipes() {
   try {
     const data = await api("GET", "/api/recipes");
     $("recipe-list").replaceChildren(...data.recipes.map((r) =>
-      el("li", { class: recipe && r.name === recipe.name ? "active" : "", onclick: () => openRecipe(r.name) },
-        el("span", { text: r.name }),
-        el("span", { class: "sub", text: r.error ? r.error : `→ ${r.target} · ${r.mode} · ${r.done}/${r.sections} written` }))));
+      el("li", { class: "item" + (recipe && r.name === recipe.name ? " active" : ""), onclick: () => openRecipe(r.name) },
+        el("div", { class: "grow" },
+          el("span", { text: r.name }),
+          el("span", { class: "sub", text: r.error ? r.error : `→ ${r.target} · ${r.mode} · ${r.done}/${r.sections} written` })),
+        el("button", { class: "small link", text: "✕", title: "delete this recipe",
+                       onclick: (e) => { e.stopPropagation(); deleteRecipe(r.name); } }))));
     if (!data.recipes.length) $("recipe-list").append(el("li", { class: "muted", text: "no recipes yet" }));
   } catch (e) { toast(e.message, true); }
 }
@@ -639,7 +1137,7 @@ loaders.recipes = () => { loadRecipes(); loadLibrary(recipe && recipe.library); 
 async function openRecipe(name) {
   try {
     showRecipe(await api("GET", `/api/recipes/${name}`));
-    $("recipe-log").replaceChildren();
+    ownLog($("recipe-log"), name);
     loadRecipes();
   } catch (e) { toast(e.message, true); }
 }
@@ -656,10 +1154,17 @@ function showRecipe(r) {
   renderSections(r);
 }
 function renderSections(r) {
+  $("recipe-tick-row").hidden = !(r && r.sections.length);
   $("recipe-sections").replaceChildren(...(r ? r.sections : []).map((s) => {
     const [first, ...rest] = s.text.split("\n");
+    const done = s.state === "done";
     return el("li", {},
       el("div", { class: "head" },
+        el("input", { type: "checkbox", class: "tick", checked: done,
+                      disabled: running || s.state === "running" || (!done && !s.code),
+                      title: done ? "untick: the next Write writes this section again"
+                                  : s.code ? "tick: keep the code it has" : "not written yet",
+                      onchange: (e) => markSections([s.num], e.target.checked) }),
         el("strong", { text: `${s.num}.` }), el("span", { text: first }),
         rest.length ? el("span", { class: "muted", text: `+${rest.length} line(s)` }) : null,
         el("span", { class: "grow" }), el("span", { class: "status " + (s.state === "changed" ? "skipped" : s.state), text: s.state })),
@@ -719,32 +1224,137 @@ $("recipe-new").addEventListener("click", () => { showRecipe(null); $("recipe-lo
 $("recipe-save").addEventListener("click", async () => {
   try { await saveRecipe(); $("recipe-status").textContent = "saved"; } catch (e) { toast(e.message, true); }
 });
-$("recipe-delete").addEventListener("click", async () => {
-  if (!recipe || !confirm(`Delete the recipe ${recipe.name}? The file it wrote stays.`)) return;
-  try { await api("DELETE", `/api/recipes/${recipe.name}`); showRecipe(null); loadRecipes(); } catch (e) { toast(e.message, true); }
+async function deleteRecipe(name) {
+  if (running) { toast("wait for the run to end", true); return; }
+  if (!confirm(`Delete the recipe ${name}? The file it wrote stays.`)) return;
+  try {
+    await api("DELETE", `/api/recipes/${name}`);
+    if (recipe && recipe.name === name) { showRecipe(null); $("recipe-log").replaceChildren(); }
+    toast("recipe deleted");
+    loadRecipes();
+  } catch (e) { toast(e.message, true); }
+}
+$("recipe-delete").addEventListener("click", () => { if (recipe) deleteRecipe(recipe.name); });
+// Ticks change only which sections the next Write writes; the editor's unsaved text stays.
+async function markSections(sections, done) {
+  if (!recipe) return;
+  try { recipe = await api("PUT", `/api/recipes/${recipe.name}/sections`, { sections, done }); loadRecipes(); }
+  catch (e) { toast(e.message, true); }
+  renderSections(recipe);
+}
+$("recipe-untick").addEventListener("click", () => {
+  if (recipe && confirm("Untick every section? The next Write writes them all again.")) markSections(null, false);
 });
 $("recipe-run").addEventListener("click", async () => {
   if (running) return;
   let r;
   try { r = await saveRecipe(); } catch (e) { toast(e.message, true); return; }
-  const log = $("recipe-log");
-  await runInLog({ url: `/api/recipes/${r.name}/run`, body: { all: $("recipe-all").checked, parallel: $("recipe-parallel").checked },
-    log, button: $("recipe-run"), busy: "writing a recipe",
-    onEvent: (ev) => {
-      if (ev.type === "section_start") logLine(`▶ section ${ev.num}: ${ev.text.split("\n")[0]}`, "ev-task", log);
-      else if (ev.type === "section_end") {
-        logLine(ev.status === "done" ? `  ✓ section ${ev.num}: ${ev.code.split("\n").length} line(s)` : `  section ${ev.num} FAILED: ${ev.note}`,
-                ev.status === "done" ? "ev-ok" : "ev-bad", log);
-      } else if (ev.type === "done") {
-        const why = { denied: "not allowed: nothing was written", "nothing to write":
-          "every section is written already; tick “all sections” to write them again" }[ev.reason];
-        logLine("■ " + (why || `${ev.reason}: wrote ${ev.written.length}, failed ${ev.failed.length} → ${ev.recipe.target}`),
-                ev.reason === "denied" || ev.failed.length ? "ev-bad" : "ev-task", log);
-        showRecipe(ev.recipe); renderState(ev.state);
-      }
-    } });
-  loadRecipes();
+  await startRun("recipe", r.name, `/api/recipes/${r.name}/run`,
+                 { all: $("recipe-all").checked, parallel: $("recipe-parallel").checked });
 });
+RUNS.recipe = { busy: "writing a recipe",
+  after: async () => {             // the sections only: unsaved text in the editor stays
+    loadRecipes();
+    if (!recipe) return;
+    try { recipe = await api("GET", `/api/recipes/${recipe.name}`); } catch (e) { return; }
+    renderSections(recipe);
+  },
+  onEvent: (ev, log) => {
+    if (ev.type === "section_start") logLine(`▶ section ${ev.num}: ${ev.text.split("\n")[0]}`, "ev-task", log);
+    else if (ev.type === "section_end") {
+      logLine(ev.status === "done" ? `  ✓ section ${ev.num}: ${ev.code.split("\n").length} line(s)` : `  section ${ev.num} FAILED: ${ev.note}`,
+              ev.status === "done" ? "ev-ok" : "ev-bad", log);
+    } else if (ev.type === "done") {
+      const why = { denied: "not allowed: nothing was written", "nothing to write":
+        "every section is written already; tick “all sections” to write them again" }[ev.reason];
+      logLine("■ " + (why || `${ev.reason}: wrote ${ev.written.length}, failed ${ev.failed.length} → ${ev.recipe.target}`),
+              ev.reason === "denied" || ev.failed.length ? "ev-bad" : "ev-task", log);
+      if (recipe && recipe.name === ev.recipe.name) showRecipe(ev.recipe);
+      renderState(ev.state);
+    }
+  } };
+
+// ================================================================= relics
+// The files recipes and plans wrote: listed under the tabs, opened and edited here.
+const RELICS_IN_NAV = 12;
+let relics = [], relicPath = null, relicDirty = false;
+const relicBy = (by) => by.map((b) => b.replace(":", " ")).join(", ");
+async function loadRelics() {
+  try { relics = (await api("GET", "/api/relics")).relics; } catch (e) { toast(e.message, true); return; }
+  renderRelics();
+}
+loaders.relics = loadRelics;
+function renderRelics() {
+  const cls = (r) => (r.path === relicPath ? " active" : "") + (r.exists ? "" : " gone");
+  $("relic-nav").replaceChildren(
+    ...relics.slice(0, RELICS_IN_NAV).map((r) => el("li", { class: cls(r).trim(), text: r.path.split("/").pop(),
+      title: `${r.path} · ${relicBy(r.by)}${r.exists ? "" : " · file gone"}`, onclick: () => openRelic(r.path) })));
+  if (relics.length > RELICS_IN_NAV) $("relic-nav").append(el("li", { class: "more", text: `+${relics.length - RELICS_IN_NAV} more` }));
+  $("relic-list").replaceChildren(...relics.map((r) =>
+    el("li", { class: "item" + cls(r), onclick: () => openRelic(r.path) },
+      el("div", { class: "grow" },
+        el("span", { text: r.path }),
+        el("span", { class: "sub", text: `${relicBy(r.by)} · ` + (r.exists ? `${when(r.updated)} · ${r.size} bytes` : "file gone") })),
+      el("button", { class: "small link", text: "✕", title: "forget: take it off the list; the file stays",
+                     onclick: (e) => { e.stopPropagation(); forgetRelic(r.path); } }))));
+  if (!relics.length) $("relic-list").append(el("li", { class: "muted", text: "nothing yet: run a recipe, or a plan that writes files" }));
+}
+async function openRelic(path, force = false) {
+  if (!force && relicDirty && path !== relicPath && !confirm("Discard unsaved changes?")) return;
+  if (!$("view-relics").classList.contains("active")) show("relics");
+  const r = relics.find((x) => x.path === path);
+  relicPath = path;
+  relicDirty = false;
+  renderRelics();
+  $("relic-empty").hidden = true;
+  $("relic-detail").hidden = false;
+  $("relic-title").textContent = path;
+  $("relic-meta").textContent = r ? relicBy(r.by) : "";
+  const recipes = r ? r.by.filter((b) => b.startsWith("recipe:")).map((b) => b.slice(7)) : [];
+  $("relic-note").textContent = recipes.length
+    ? `Written by the recipe ${recipes.join(", ")}: its next Write rebuilds the whole file, replacing edits made here.`
+    : "Edits are written to the file when you save. Ctrl+S saves.";
+  $("relic-status").textContent = "";
+  try {
+    $("relic-text").value = (await api("GET", "/api/relics/file?" + new URLSearchParams({ path }))).text;
+    $("relic-text").disabled = $("relic-save").disabled = false;
+  } catch (e) {
+    $("relic-text").value = "";
+    $("relic-text").disabled = $("relic-save").disabled = true;
+    $("relic-status").textContent = e.message;
+  }
+}
+async function saveRelic() {
+  if (!relicPath || $("relic-save").disabled) return;
+  try {
+    relics = (await api("PUT", "/api/relics/file", { path: relicPath, text: $("relic-text").value })).relics;
+    relicDirty = false;
+    $("relic-status").textContent = "saved";
+    renderRelics();
+  } catch (e) { toast(e.message, true); }
+}
+async function forgetRelic(path) {
+  if (!confirm(`Forget ${path}? It leaves this list; the file stays.`)) return;
+  try {
+    relics = (await api("DELETE", "/api/relics/file?" + new URLSearchParams({ path }))).relics;
+    if (path === relicPath) {
+      relicPath = null;
+      relicDirty = false;
+      $("relic-detail").hidden = true;
+      $("relic-empty").hidden = false;
+    }
+    renderRelics();
+  } catch (e) { toast(e.message, true); }
+}
+$("relic-text").addEventListener("input", () => { relicDirty = true; $("relic-status").textContent = "unsaved"; });
+$("relic-text").addEventListener("keydown", (e) => {
+  if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveRelic(); }
+});
+$("relic-save").addEventListener("click", saveRelic);
+$("relic-revert").addEventListener("click", () => {
+  if (relicPath && (!relicDirty || confirm("Discard unsaved changes?"))) openRelic(relicPath, true);
+});
+$("relic-forget").addEventListener("click", () => { if (relicPath) forgetRelic(relicPath); });
 
 // ================================================================= models
 async function loadModels() {
@@ -831,14 +1441,25 @@ async function loadSettings() {
         if (s.key in edits) row.classList.add("edited");
         return row;
       }));
+  } catch (e) { toast(e.message, true); }
+}
+async function loadTools() {
+  try {
     const t = await api("GET", "/api/tools");
+    $("tool-count").textContent = `· ${t.tools.length}`;
+    $("tool-warnings").hidden = !t.warnings.length;
+    $("tool-warnings").textContent = t.warnings.join("\n");
     $("tool-rows").replaceChildren(...t.tools.map((x) => el("tr", {},
       el("td", {}, el("strong", { class: x.risky ? "risky" : "", text: x.name })),
       el("td", { class: "muted", text: x.risky ? "asks first" : "runs freely" }),
-      el("td", { text: x.description }))));
+      el("td", { text: x.description }),
+      el("td", { class: "params" }, ...Object.entries(x.params).flatMap(([k, v], i) => [i ? el("br") : null,
+        el("code", { text: k + ("default" in v ? ` = ${JSON.stringify(v.default)}` : ""), title: `${v.type}: ${v.desc || ""}` })])))));
+    if (!t.tools.length) $("tool-rows").append(el("tr", {}, el("td", { colspan: 4, class: "muted", text: "no tools loaded" })));
   } catch (e) { toast(e.message, true); }
 }
-loaders.settings = () => { refreshState(); loadSettings(); };
+subTabs("settings-tabs", "spane-", "sh-spane");
+loaders.settings = () => { refreshState(); loadSettings(); loadTools(); };
 $("config-filter").addEventListener("input", () => { clearTimeout(filterTimer); filterTimer = setTimeout(loadSettings, 200); });
 $("config-changed").addEventListener("change", loadSettings);
 $("config-save").addEventListener("click", async () => {
@@ -858,6 +1479,7 @@ $("config-save").addEventListener("click", async () => {
 
 // ================================================================== start
 refreshState();
-show(["research", "planner", "recipes", "models", "settings"].includes(recall("sh-view", "")) ? recall("sh-view", "") : "research");
+loadRelics();
+show(["chat", "research", "notes", "planner", "recipes", "relics", "models", "settings"].includes(recall("sh-view", "")) ? recall("sh-view", "") : "chat");
 showPane(recall("sh-pane", "") === "bibliography" ? "bibliography" : "ask");
 setInterval(() => { if (!document.hidden && !running) refreshState(); }, 5000);

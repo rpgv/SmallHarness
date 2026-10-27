@@ -51,7 +51,7 @@ kv_cache_mb = 0                  # 0 = exact from the model file's KV-cache tens
 model_mb = 0                     # model size, when [model].path is an imported ID instead of a file
 max_instances = 4
 
-[context]                        # continuous plan runs: one context, refreshed as it fills
+[context]                        # chats and continuous plan runs: one context, refreshed as it fills
 refresh_threshold = 0.80         # fold older turns into a summary when the window is this full
 auto_refresh = true
 keep_recent_turns = 4

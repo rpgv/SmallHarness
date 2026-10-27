@@ -16,6 +16,14 @@ CONVERSATION:
 
 SUMMARY:"""
 
+# -------------------------------------------------------------------- chat
+CHAT_SYSTEM = ("You are a helpful assistant in a conversation. Be brief and plain. You cannot read files "
+               "or run anything: use only what is in this conversation, and say so when you do not know.")
+
+CHAT_AGENT_SYSTEM = "You are a helpful assistant in a conversation. For this message you may use tools."
+
+CHAT_THREAD = "This is a thread on message #{num}, shown first. Keep to it."
+
 # ---------------------------------------------------------------- research
 RESEARCH_SYSTEM = ("Answer only from the excerpts. After each claim put the number of the excerpt it "
                    "comes from, like [3]. If the excerpts do not answer the question, say so.")

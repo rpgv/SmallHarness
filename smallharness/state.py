@@ -50,8 +50,19 @@ class StateDir:
         return self._dir("library")
 
     @property
+    def chats(self) -> Path:
+        """Chat mode's conversations, each with its archive of folded turns (chat.py)."""
+        return self._dir("chats")
+
+    @property
     def notes(self) -> Path:
         return self._dir("notes")
+
+    @property
+    def relics(self) -> Path:
+        """The files recipes and plans wrote (relics.py)."""
+        self._dir("")
+        return self.root / "relics.json"
 
     @property
     def tools(self) -> Path:

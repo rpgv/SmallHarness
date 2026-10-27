@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import asdict
 from typing import Any, Callable, Iterator
 
 from ..config import DEFAULTS, flatten, is_secret, parse_value
@@ -14,10 +15,11 @@ from ..recipe import (
     list_recipes,
     load_recipe,
     load_saved,
+    mark_sections,
     recipes_dir,
     save_recipe,
 )
-from .app import ApiError, WebApp, WebEvents
+from .app import ApiError, Job, WebApp, WebEvents
 
 # ------------------------------------------------------------------ routes
 Route = Callable[..., Any]
@@ -32,6 +34,14 @@ def route(method: str, pattern: str):
         ROUTES.append((method, re.compile(f"^{pattern}$"), fn))
         return fn
     return deco
+
+
+def _numbers(body: dict, key: str) -> list[int] | None:
+    """An optional list of step or section numbers (None: all of them)."""
+    nums = body.get(key)
+    if nums is not None and not (isinstance(nums, list) and all(isinstance(n, int) for n in nums)):
+        raise ApiError(400, f"{key!r} is a list of numbers")
+    return nums
 
 
 def _need(body: dict, key: str, kind=str):
@@ -198,6 +208,9 @@ def get_plans(app: WebApp, q, body):
 
 @route("GET", r"/api/plans/([\w-]+)")
 def get_plan(app: WebApp, q, body, pid):
+    live = app.live("run|expand", pid)
+    if live:
+        return app.plan_dict(live)
     return app.plan_dict(app.load_plan(pid))
 
 
@@ -216,12 +229,36 @@ def post_plan(app: WebApp, q, body):
 @route("PUT", r"/api/plans/([\w-]+)")
 def put_plan(app: WebApp, q, body, pid):
     text = _need(body, "text")
-    if app.working and app.plan and app.plan.id == pid:
-        raise ApiError(409, "this plan is running; edit it when the run ends")
+    _not_running(app, pid)
     plan = app.load_plan(pid)
     warnings = edit_plan(app.h, plan, str(body.get("goal") or ""), text)
     app.plan = plan
     return dict(app.plan_dict(plan), warnings=warnings)
+
+
+def _not_running(app: WebApp, pid: str) -> None:
+    if app.live("run|expand", pid):
+        raise ApiError(409, "this plan is running; wait for the run to end")
+
+
+@route("DELETE", r"/api/plans/([\w-]+)")
+def delete_plan(app: WebApp, q, body, pid):
+    _not_running(app, pid)
+    app.h.plans.delete(pid)
+    if app.plan and app.plan.id == pid:
+        app.plan = None
+    return {"deleted": pid}
+
+
+@route("PUT", r"/api/plans/([\w-]+)/steps")
+def put_plan_steps(app: WebApp, q, body, pid):
+    """Tick steps off by hand, or untick them so the next run does them again
+    ('steps' empty: every step)."""
+    _not_running(app, pid)
+    plan = app.load_plan(pid)
+    plan.mark(_numbers(body, "steps"), bool(body.get("done")))
+    app.h.plans.save(plan)
+    return app.plan_dict(plan)
 
 
 @route("POST", r"/api/plans/([\w-]+)/run")
@@ -230,26 +267,24 @@ def post_run(app: WebApp, q, body, pid):
     mode = body.get("mode", "fresh")
     if mode not in ("fresh", "continuous"):
         raise ApiError(400, "mode must be fresh or continuous")
-    app.check_free()
 
-    def stream(ev: WebEvents) -> Iterator[dict]:
-        with app.model_work("running a plan"):
-            app.ensure_loaded(ev)
-            app.plan = plan
+    def produce(ev: WebEvents, job: Job) -> Iterator[dict]:
+        app.ensure_loaded(ev)
+        app.plan = job.subject = plan
 
-            def start(t):
-                ev.emit({"type": "task_start", "num": t.num, "task": t.task, "tool": t.tool, "detail": t.detail})
+        def start(t):
+            ev.emit({"type": "task_start", "num": t.num, "task": t.task, "tool": t.tool, "detail": t.detail})
 
-            def end(t):
-                ev.emit({"type": "task_end", "num": t.num, "status": t.status, "result": t.result,
-                         "plan": app.plan_dict(plan)})
+        def end(t):
+            ev.emit({"type": "task_end", "num": t.num, "status": t.status, "result": t.result,
+                     "plan": app.plan_dict(plan)})
 
-            runner = PlanRunner(app.h, plan, mode, ev, parallel=bool(body.get("parallel")) or None)
-            keep_going = bool(body.get("continue_on_failure"))
-            runner.run(start, end, lambda t: keep_going)
-            yield {"type": "done", "reason": "finished" if plan.finished else "stopped",
-                   "plan": app.plan_dict(plan), "state": app.state()}
-    return stream
+        runner = PlanRunner(app.h, plan, mode, ev, parallel=bool(body.get("parallel")) or None)
+        keep_going = bool(body.get("continue_on_failure"))
+        runner.run(start, end, lambda t: keep_going)
+        yield {"type": "done", "reason": "finished" if plan.finished else "stopped",
+               "plan": app.plan_dict(plan), "state": app.state()}
+    return app.start_job("run", pid, "running a plan", produce)
 
 
 @route("POST", r"/api/plans/([\w-]+)/expand")
@@ -257,22 +292,18 @@ def post_expand(app: WebApp, q, body, pid):
     """Expansion passes: each makes the chosen steps' details deeper (all steps when
     'steps' is empty), steps in parallel as RAM allows."""
     plan = app.load_plan(pid)
-    steps = body.get("steps") or None
-    if steps is not None and not (isinstance(steps, list) and all(isinstance(n, int) for n in steps)):
-        raise ApiError(400, "'steps' is a list of step numbers")
+    steps = _numbers(body, "steps") or None
     times = max(1, min(int(body.get("times") or 1), 5))
-    app.check_free()
 
-    def stream(ev: WebEvents) -> Iterator[dict]:
-        with app.model_work("expanding a plan"):
-            app.ensure_loaded(ev)
-            app.plan = plan
-            for i in range(times):
-                ev.emit({"type": "status", "text": f"pass {i + 1} of {times}"})
-                expand(app.h, plan, steps, parallel=body.get("parallel", True) is not False,
-                       on_end=lambda t: ev.emit({"type": "step", "num": t.num, "depth": t.depth, "detail": t.detail}))
-            yield {"type": "done", "plan": app.plan_dict(plan), "state": app.state()}
-    return stream
+    def produce(ev: WebEvents, job: Job) -> Iterator[dict]:
+        app.ensure_loaded(ev)
+        app.plan = job.subject = plan
+        for i in range(times):
+            ev.emit({"type": "status", "text": f"pass {i + 1} of {times}"})
+            expand(app.h, plan, steps, parallel=body.get("parallel", True) is not False,
+                   on_end=lambda t: ev.emit({"type": "step", "num": t.num, "depth": t.depth, "detail": t.detail}))
+        yield {"type": "done", "plan": app.plan_dict(plan), "state": app.state()}
+    return app.start_job("expand", pid, "expanding a plan", produce)
 
 
 # --------------------------------------------------------------- recipes
@@ -299,6 +330,9 @@ def get_recipes(app: WebApp, q, body):
 
 @route("GET", r"/api/recipes/([\w-]+)")
 def get_recipe(app: WebApp, q, body, name):
+    live = app.live("recipe", name)
+    if live:
+        return _recipe_dict(live)
     return _recipe_dict(load_saved(app.h.cfg, name))
 
 
@@ -311,6 +345,8 @@ def put_recipe(app: WebApp, q, body, name):
 
 @route("DELETE", r"/api/recipes/([\w-]+)")
 def delete_recipe(app: WebApp, q, body, name):
+    if app.live("recipe", name):
+        raise ApiError(409, "a recipe is being written; wait for it to end")
     r = load_saved(app.h.cfg, name)
     r.path.unlink()
     if r.cache:
@@ -318,26 +354,152 @@ def delete_recipe(app: WebApp, q, body, name):
     return {"deleted": name}
 
 
+@route("PUT", r"/api/recipes/([\w-]+)/sections")
+def put_recipe_sections(app: WebApp, q, body, name):
+    """Untick sections so the next run writes them again, or tick them back
+    ('sections' empty: every section)."""
+    if app.live("recipe", name):
+        raise ApiError(409, "a recipe is being written; wait for it to end")
+    recipe = load_saved(app.h.cfg, name)
+    mark_sections(recipe, _numbers(body, "sections"), bool(body.get("done")))
+    return _recipe_dict(recipe)
+
+
 @route("POST", r"/api/recipes/([\w-]+)/run")
 def post_recipe_run(app: WebApp, q, body, name):
     recipe = load_saved(app.h.cfg, name)
-    only = body.get("only") or None
-    if only is not None and not (isinstance(only, list) and all(isinstance(n, int) for n in only)):
-        raise ApiError(400, "'only' is a list of section numbers")
+    only = _numbers(body, "only") or None
     runner = RecipeRunner(app.h, recipe, only=only, everything=bool(body.get("all")))
-    app.check_free()
 
-    def stream(ev: WebEvents) -> Iterator[dict]:
-        with app.model_work("writing a recipe"):
+    def produce(ev: WebEvents, job: Job) -> Iterator[dict]:
+        app.ensure_loaded(ev)
+        job.subject = recipe
+        runner.events = ev
+        res = runner.run(on_start=lambda s: ev.emit({"type": "section_start", "num": s.num, "text": s.text}),
+                         on_end=lambda s: ev.emit({"type": "section_end", "num": s.num, "status": s.status,
+                                                   "note": s.note, "code": s.code}),
+                         parallel=bool(body.get("parallel")))
+        yield {"type": "done", "reason": res.reason, "written": res.written, "failed": res.failed,
+               "recipe": _recipe_dict(recipe), "state": app.state()}
+    return app.start_job("recipe", name, "writing a recipe", produce)
+
+
+@route("GET", r"/api/jobs/(\w+)/events")
+def get_job_events(app: WebApp, q, body, jid):
+    """Follow a background run, replaying its events from number `since` (0: all)."""
+    if not app.job or app.job.id != jid:
+        raise ApiError(404, "that run is no longer kept")
+    return app.job
+
+
+# ------------------------------------------------------------------ chat
+def _chat_busy(app: WebApp, cid: str) -> None:
+    if app.live("chat", cid):
+        raise ApiError(409, "the model is answering in this chat; wait for it or press Stop")
+
+
+@route("GET", "/api/chats")
+def get_chats(app: WebApp, q, body):
+    from ..chat import COMMANDS
+    return {"chats": app.h.chats.list(),
+            "commands": [{"name": k, "usage": u, "about": a} for k, (u, a) in COMMANDS.items()],
+            "tools": [t.name for t in app.h.tools]}
+
+
+@route("POST", "/api/chats")
+def post_chat(app: WebApp, q, body):
+    return app.h.chats.new().to_dict()
+
+
+@route("GET", r"/api/chats/([\w-]+)")
+def get_chat(app: WebApp, q, body, cid):
+    return app.h.chats.load(cid).to_dict()
+
+
+@route("PUT", r"/api/chats/([\w-]+)")
+def put_chat(app: WebApp, q, body, cid):
+    chat = app.h.chats.load(cid)
+    chat.title = _need(body, "title").strip()[:120]
+    chat.save()
+    return chat.to_dict()
+
+
+@route("DELETE", r"/api/chats/([\w-]+)")
+def delete_chat(app: WebApp, q, body, cid):
+    _chat_busy(app, cid)
+    app.h.chats.delete(cid)
+    return {"deleted": cid}
+
+
+@route("POST", r"/api/chats/([\w-]+)/send")
+def post_chat_send(app: WebApp, q, body, cid):
+    """A message (with any command lines) and the reply, as a background job: each new
+    message is an event, and the reply streams as text."""
+    chat = app.h.chats.load(cid)
+    text = _need(body, "text")
+    thread = body.get("thread") or 0
+    if not isinstance(thread, int):
+        raise ApiError(400, "'thread' is a message number")
+    if thread:
+        chat.get(thread)
+    commands, question = chat.check(text)
+
+    def produce(ev: WebEvents, job: Job) -> Iterator[dict]:
+        job.subject = chat
+        if question or any(n in ("agent", "ask", "plan", "runplan", "recipe") for n, _ in commands):
             app.ensure_loaded(ev)
-            runner.events = ev
-            res = runner.run(on_start=lambda s: ev.emit({"type": "section_start", "num": s.num, "text": s.text}),
-                             on_end=lambda s: ev.emit({"type": "section_end", "num": s.num, "status": s.status,
-                                                       "note": s.note, "code": s.code}),
-                             parallel=bool(body.get("parallel")))
-            yield {"type": "done", "reason": res.reason, "written": res.written, "failed": res.failed,
-                   "recipe": _recipe_dict(recipe), "state": app.state()}
-    return stream
+        chat.send(text, thread, ev, on_message=lambda m: ev.emit({"type": "message", "message": asdict(m)}))
+        yield {"type": "done", "chat": chat.to_dict(), "state": app.state()}
+    return app.start_job("chat", cid, "answering in chat", produce)
+
+
+@route("PUT", r"/api/chats/([\w-]+)/messages/(\d+)/pin")
+def put_chat_pin(app: WebApp, q, body, cid, num):
+    _chat_busy(app, cid)
+    chat = app.h.chats.load(cid)
+    chat.pin(int(num), bool(body.get("pinned", True)))
+    return chat.to_dict()
+
+
+@route("POST", r"/api/chats/([\w-]+)/rewind")
+def post_chat_rewind(app: WebApp, q, body, cid):
+    """Clear everything after message 'to' (0: all); with 'thread', only that thread's replies."""
+    _chat_busy(app, cid)
+    chat = app.h.chats.load(cid)
+    to, thread = body.get("to"), body.get("thread") or 0
+    if not isinstance(to, int) or not isinstance(thread, int):
+        raise ApiError(400, "'to' (and 'thread') are message numbers")
+    gone = chat.rewind(to, thread)
+    return dict(chat.to_dict(), cleared=gone)
+
+
+# ---------------------------------------------------------------- relics
+@route("GET", "/api/relics")
+def get_relics(app: WebApp, q, body):
+    return {"relics": app.h.relics.all()}
+
+
+@route("GET", "/api/relics/file")
+def get_relic(app: WebApp, q, body):
+    path = q.get("path", "")
+    return {"path": path, "text": app.h.relics.read(path)}
+
+
+@route("PUT", "/api/relics/file")
+def put_relic(app: WebApp, q, body):
+    path = _need(body, "path")
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise ApiError(400, "'text' is required")
+    app.h.relics.save(path, text)
+    return {"path": path, "relics": app.h.relics.all()}
+
+
+@route("DELETE", "/api/relics/file")
+def delete_relic(app: WebApp, q, body):
+    """Take a file off the list; the file itself stays."""
+    app.h.relics.forget(q.get("path", ""))
+    return {"relics": app.h.relics.all()}
 
 
 # ---------------------------------------------------------- code library
