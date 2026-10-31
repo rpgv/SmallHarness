@@ -1,6 +1,6 @@
 # SmallHarness
 
-A rigid harness for small local models, built for Google's
+A vibe-coded (by claude opus 5.5) rigid harness for small local models, targeting Google's
 [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM), with
 [Ollama](https://ollama.com) as a second engine. Small models do best with a narrow
 job and a clean context, so every mode keeps the model's context small. There are three
