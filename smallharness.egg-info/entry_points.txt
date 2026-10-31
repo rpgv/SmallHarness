@@ -1,2 +1,0 @@
-[console_scripts]
-smallharness = smallharness.cli:main

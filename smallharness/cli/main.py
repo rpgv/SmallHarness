@@ -83,8 +83,8 @@ def probe_embedder(h: Harness) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="smallharness",
-        description="Small local models (LiteRT-LM, or Ollama), used through three modes: research, "
-                    "planner and recipe. Without a command, choose a mode.")
+        description="Small local models (LiteRT-LM, or Ollama), used through three modes: chat, research "
+                    "and planner. Without a command, choose a mode.")
     p.add_argument("-m", "--model", help="a model file, a name from `smallharness models`, or (ollama) a model name")
     p.add_argument("-b", "--backend", choices=["litert", "ollama", "mock"])
     p.add_argument("-w", "--workspace", default=".", help="project directory (default: current)")
@@ -95,6 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="trust this workspace's tools and commands for this run, without asking")
     p.add_argument("--version", action="version", version=f"smallharness {__version__}")
     sub = p.add_subparsers(dest="cmd")
+    ch = sub.add_parser("chat", help="chat with the model; tools only on command (with a message: reply and exit)")
+    ch.add_argument("message", nargs="*")
     rs = sub.add_parser("research", help="ask questions of your files and notes (with a question: answer and exit)")
     rs.add_argument("question", nargs="*")
     ask = sub.add_parser("ask", help="one research question: answer from the knowledge base and exit")
@@ -106,16 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--expand", type=int, default=0, metavar="N", help="expand every step N passes")
     pl.add_argument("--run", choices=["fresh", "continuous"])
     pl.add_argument("--parallel", action="store_true", help="expand steps and run independent tasks in parallel")
-    rc = sub.add_parser("recipe", help="recipe mode (with a name: write it and exit)")
-    rc.add_argument("recipe", nargs="?", help="a saved recipe's name, or a recipe file in the workspace")
-    rc.add_argument("--to", help="the file to write (default: the recipe's `target:` line)")
-    kind = rc.add_mutually_exclusive_group()
-    kind.add_argument("--text", action="store_true", help="write Markdown prose (default for .md targets)")
-    kind.add_argument("--code", action="store_true", help="write code")
-    rc.add_argument("--all", action="store_true", help="write every section again, not only new or changed ones")
-    rc.add_argument("--only", help="write only these sections, e.g. 2,3")
-    rc.add_argument("--parallel", action="store_true", help="write sections in parallel, as RAM allows")
-    rc.add_argument("-y", "--yes", action="store_true", help="allow risky_write_file without asking")
+    pl.add_argument("--checks", action="store_true", help="let expansion propose checks for each step")
+    pl.add_argument("--persist", metavar="N", help="retries per failed step, 0-10 or max (until it succeeds or is stopped)")
     wb = sub.add_parser("web", help="open the visual interface in a browser (local web server)")
     wb.add_argument("--host", default="127.0.0.1", help="address to listen on (default: this machine only)")
     wb.add_argument("--port", type=int, default=8765, help="port (0: any free port)")
@@ -137,9 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-MODES = {"research": ("ask questions of your files and notes, with references", "ResearchShell"),
-         "planner": ("plan code changes, expand the steps, run them", "PlannerShell"),
-         "recipe": ("turn a section-by-section recipe into code or text", "RecipeShell")}
+MODES = {"chat": ("talk with the model; tools and other modes only on command", "ChatShell"),
+         "research": ("ask questions of your files and notes, with references", "ResearchShell"),
+         "planner": ("plan code changes, expand the steps, run them", "PlannerShell")}
 
 
 def choose_mode() -> str | None:
@@ -166,9 +160,9 @@ def choose_mode() -> str | None:
 
 def run_modes(h: Harness, events, first: str | None, no_color: bool) -> int:
     """The chosen mode, then the menu again after /mode, until /exit."""
-    from . import planner_mode, recipe_mode, research_mode
-    classes = {"research": research_mode.ResearchShell, "planner": planner_mode.PlannerShell,
-               "recipe": recipe_mode.RecipeShell}
+    from . import chat_mode, planner_mode, research_mode
+    classes = {"chat": chat_mode.ChatShell, "research": research_mode.ResearchShell,
+               "planner": planner_mode.PlannerShell}
     setup_readline(h.cfg.state.history)
     mode = first or choose_mode()
     while mode:
@@ -281,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if name else 1
     if args.cmd == "delete":
         return 0 if delete_model(cfg, args.name, assume_yes=args.yes) else 1
-    interactive = args.cmd in (None, "research", "plan", "web", "recipe")
+    interactive = args.cmd in (None, "chat", "research", "plan", "web")
     confirm_trust(cfg, interactive and sys.stdin.isatty())
     for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
         if sig is not None:
@@ -332,6 +326,12 @@ def _run(h: Harness, cfg: Config, args, events: Events) -> int:
         print(ui.err(f"cannot start model: {e}"))
         print(ui.dim("try the mock backend first: smallharness --backend mock"))
         return 1
+    if args.cmd == "chat" and args.message:
+        from .chat_mode import ChatShell
+        shell = ChatShell(h, events, args.no_color)
+        shell.send(" ".join(args.message), 0)
+        print(ui.dim(f"  kept as chat {shell.chat.id}"))
+        return 0
     if args.cmd in ("ask", "research") and args.question:
         from .research_mode import ResearchShell
         shell = ResearchShell(h, events, args.no_color)
@@ -342,16 +342,12 @@ def _run(h: Harness, cfg: Config, args, events: Events) -> int:
         from .planner_mode import PlannerShell
         shell = PlannerShell(h, events, args.no_color)
         shell.text(" ".join(args.goal))
+        if args.persist:
+            shell.cmd_persist(args.persist)
         if args.expand:
-            shell.cmd_expand(f"times={args.expand}")
+            shell.cmd_expand(f"times={args.expand}" + (" checks" if args.checks else ""))
         if args.run:
             shell.cmd_run(args.run + (" parallel" if args.parallel else ""))
         return 0
-    if args.cmd == "recipe" and args.recipe:
-        from .recipe_mode import RecipeShell
-        only = [int(n) for n in args.only.split(",")] if args.only else None
-        mode = "text" if args.text else "code" if args.code else None
-        return RecipeShell(h, events, args.no_color).write(args.recipe, args.to, mode, args.all, only,
-                                                           args.parallel, args.yes)
-    first = {"research": "research", "plan": "planner", "recipe": "recipe"}.get(args.cmd)
+    first = {"chat": "chat", "research": "research", "plan": "planner"}.get(args.cmd)
     return run_modes(h, events, first, args.no_color)

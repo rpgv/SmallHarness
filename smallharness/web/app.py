@@ -1,17 +1,19 @@
 """What the web API shares between requests: the harness, whether the model is busy,
-Stop, permission questions waiting for the page, and how events reach the page."""
+Stop, permission questions waiting for the page, how events reach the page, and the
+plan run working in the background."""
 from __future__ import annotations
 
 import threading
 import time
 import uuid
+from dataclasses import asdict
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from .. import __version__
 from ..agent import Events, Harness
 from ..errors import HarnessError
-from ..planning import Plan, plan_text
+from ..planning import PERSISTENCE_MAX, Plan, plan_text
 
 STATIC = Path(__file__).parent / "static"
 
@@ -37,9 +39,45 @@ class Stopped(KeyboardInterrupt):
     """Raised inside model work when the user pressed Stop or closed the page."""
 
 
+class Job:
+    """A plan run or expansion, working in the background so it outlives the
+    request that started it. Its events are kept: a page that went away (reloaded, or a
+    phone that put the browser to sleep) comes back and follows it from where it was."""
+
+    def __init__(self, kind: str, target: str, label: str):
+        self.id = uuid.uuid4().hex[:12]
+        self.kind, self.target, self.label = kind, target, label
+        self.subject = None                   # the plan being worked on, live
+        self.events: list[dict] = []
+        self.finished = False
+        self._cond = threading.Condition()
+
+    def push(self, obj: dict) -> None:
+        with self._cond:
+            self.events.append(obj)
+            self._cond.notify_all()
+
+    def end(self) -> None:
+        with self._cond:
+            self.finished = True
+            self._cond.notify_all()
+
+    def wait(self, since: int, timeout: float) -> tuple[list[dict], bool]:
+        """The events from number `since` on (waiting up to `timeout` for one), and
+        whether the job has finished."""
+        with self._cond:
+            if since >= len(self.events) and not self.finished:
+                self._cond.wait(timeout)
+            return self.events[since:], self.finished
+
+    def info(self) -> dict:
+        return {"id": self.id, "kind": self.kind, "target": self.target, "label": self.label,
+                "finished": self.finished}
+
+
 class WebEvents(Events):
-    """Harness events as NDJSON lines on the open response. A risky tool call is sent
-    to the page and waits for the user's answer (POST /api/permit)."""
+    """Harness events as NDJSON lines on the open response, or kept in a job. A risky
+    tool call is sent to the page and waits for the user's answer (POST /api/permit)."""
 
     def __init__(self, app: "WebApp", write: Callable[[dict], None]):
         self.app = app
@@ -80,6 +118,10 @@ class WebEvents(Events):
             return bool(waiter[1])
         finally:
             self.app.pending.pop(pid, None)
+            try:                              # other pages showing the question close it
+                self._write({"type": "permit_end", "id": pid})
+            except OSError:
+                pass
 
 
 class WebApp:
@@ -92,6 +134,7 @@ class WebApp:
         self.plan: Plan | None = None
         self.load_s: float | None = None    # how long the last model load took
         self.working = ""                     # what the model is doing, for /api/state
+        self.job: Job | None = None           # the latest background run
 
     @property
     def research(self):
@@ -124,6 +167,39 @@ class WebApp:
                 return False
         return _Work()
 
+    def start_job(self, kind: str, target: str, label: str,
+                  produce: Callable[[WebEvents, Job], Iterator[dict]]) -> Job:
+        """Run `produce` in the background as model work. Busy is refused here, so the
+        page gets a real 409; Stop ends the job, but a page going away does not."""
+        work = self.model_work(label)
+        work.__enter__()
+        job = self.job = Job(kind, target, label)
+        ev = WebEvents(self, job.push)
+
+        def run() -> None:
+            try:
+                for item in produce(ev, job):
+                    job.push(item)
+            except HarnessError as e:
+                job.push({"type": "error", "error": str(e), "status": e.status})
+            except KeyboardInterrupt:
+                job.push({"type": "stopped", "state": dict(self.state(), busy="")})
+            except Exception as e:  # report, do not kill the server
+                job.push({"type": "error", "error": f"{type(e).__name__}: {e}"})
+            finally:
+                work.__exit__(None, None, None)
+                job.end()
+        threading.Thread(target=run, name=f"job-{kind}", daemon=True).start()
+        return job
+
+    def live(self, kind: str, target: str):
+        """The plan a running job is working on, or None: it shows steps
+        as they run, which the saved copy does not."""
+        job = self.job
+        if job and not job.finished and job.kind in kind.split("|") and job.target == target:
+            return job.subject
+        return None
+
     def check_free(self) -> None:
         """Refuse before a streamed reply starts, so the page gets a real 409. (model_work
         still decides, in case another request starts in between.)"""
@@ -149,8 +225,10 @@ class WebApp:
 
     def plan_dict(self, plan: Plan) -> dict:
         tasks = [{"num": t.num, "task": t.task, "tool": t.tool, "after": t.after, "status": t.status,
-                  "result": t.result, "detail": t.detail, "depth": t.depth} for t in plan.tasks]
+                  "result": t.result, "detail": t.detail, "depth": t.depth, "attempts": t.attempts,
+                  "checks": [asdict(c) for c in t.checks]} for t in plan.tasks]
         return {"id": plan.id, "goal": plan.goal, "mode": plan.mode, "tasks": tasks,
+                "persistence": plan.persistence, "persistence_max": PERSISTENCE_MAX,
                 "finished": plan.finished, "text": plan_text(plan)}
 
     def load_plan(self, plan_id: str) -> Plan:
@@ -173,5 +251,6 @@ class WebApp:
             "search": h.search_mode(), "embeddings": bool(h.embedder),
             "plan": self.plan.id if self.plan else None, "notes": len(h.notes.all()),
             "knowledge": {"sources": len(h.project_rag.sources), "chunks": len(h.project_rag)},
-            "busy": self.working, "untrusted": cfg.untrusted.describe() if cfg.untrusted else [],
+            "busy": self.working, "job": self.job.info() if self.job else None,
+            "untrusted": cfg.untrusted.describe() if cfg.untrusted else [],
         }

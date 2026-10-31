@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# SmallHarness: per-workspace state and downloaded models
+.smallharness/
+models/
+smallharness.toml
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+.devcontainer/

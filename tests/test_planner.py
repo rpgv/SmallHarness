@@ -83,3 +83,98 @@ class Planner(WorkspaceTest):
         h.plans.save(plan)
         loaded = h.plans.load(plan.id)
         self.assertEqual((loaded.tasks[0].detail, loaded.tasks[0].depth), ("Use the old way.", 1))
+
+
+class Persistence(WorkspaceTest):
+    """Retries from a clean context, checks that repeat their task, and the gauge's top."""
+
+    def test_no_persistence_fails_once(self):
+        h = self.harness(["FAILED: no such file", "DONE: unused"])
+        plan, _ = draft_plan(h, "g", "[none] Do it")
+        self.assertEqual(plan.persistence, 2)                                     # the default for new plans
+        PlanRunner(h, plan, persistence=0).run()
+        self.assertEqual((plan.tasks[0].status, plan.tasks[0].attempts), ("failed", 1))
+        self.assertEqual(len(self.backend.prompts), 1)
+
+    def test_retries_start_clean_with_the_last_failure(self):
+        h = self.harness(["working on it\nFAILED: cli.py not found", "DONE: found it in src/"])
+        plan, _ = draft_plan(h, "g", "[none] Find the CLI")
+        PlanRunner(h, plan, "continuous", persistence=2).run()
+        t = plan.tasks[0]
+        self.assertEqual((t.status, t.attempts, t.result), ("done", 2, "found it in src/"))
+        first, retry = self.backend.prompts
+        self.assertNotIn("EARLIER ATTEMPT", first)
+        self.assertIn("AN EARLIER ATTEMPT AT THIS TASK FAILED:\ncli.py not found", retry)
+        self.assertNotIn("working on it", retry)                 # a clean context, even in a continuous run
+        self.assertEqual(h.plans.load(plan.id).persistence, 2)
+
+    def test_retries_stop_at_the_gauge(self):
+        h = self.harness(["FAILED: a"] * 5)
+        plan, _ = draft_plan(h, "g", "[none] Do it")
+        PlanRunner(h, plan, persistence=2).run()
+        self.assertEqual((plan.tasks[0].status, plan.tasks[0].attempts), ("failed", 3))
+
+    def test_max_persistence_goes_on_until_it_succeeds(self):
+        from smallharness.planning import PERSISTENCE_MAX
+        h = self.harness(["FAILED: not yet"] * 25 + ["DONE: at last"])
+        plan, _ = draft_plan(h, "g", "[none] Do it")
+        PlanRunner(h, plan, persistence=PERSISTENCE_MAX).run()
+        self.assertEqual((plan.tasks[0].status, plan.tasks[0].attempts), ("done", 26))
+
+    def test_a_failed_check_repeats_its_task(self):
+        h = self.harness(["DONE: wrote hello.py", "FAILED: it raises NameError",     # attempt 1, its check
+                          "DONE: fixed hello.py", "DONE: it prints hello"])         # attempt 2, its check
+        plan, _ = draft_plan(h, "g", "1. [none] Write hello.py\n   check: [none] python hello.py prints hello\n"
+                                     "2. [none] Report (after: 1)")
+        PlanRunner(h, plan, persistence=1).run(should_continue=lambda t: False)
+        t = plan.tasks[0]
+        self.assertEqual((t.status, t.attempts, t.checks[0].status), ("done", 2, "done"))
+        self.assertIn("AFTERWARDS IT WILL BE CHECKED THAT:\n- python hello.py prints hello", self.backend.prompts[0])
+        check = self.backend.prompts[1]
+        self.assertIn("CHECK: python hello.py prints hello", check)
+        self.assertIn("It reported: wrote hello.py", check)
+        self.assertIn("check failed: python hello.py prints hello: it raises NameError", self.backend.prompts[2])
+
+    def test_a_failed_check_without_persistence_fails_the_task(self):
+        h = self.harness(["DONE: wrote it", "FAILED: empty file"])
+        plan, _ = draft_plan(h, "g", "1. [none] Write it\n   check: [none] the file has text")
+        PlanRunner(h, plan, persistence=0).run()
+        self.assertEqual(plan.tasks[0].status, "failed")
+        self.assertIn("empty file", plan.tasks[0].result)
+
+    def test_a_refused_tool_ends_the_retries(self):
+        h = self.harness(['<tool>{"name": "risky_write_file", "args": {"path": "x.txt", "content": "hi"}}</tool>',
+                          "FAILED: not allowed"] + ["DONE: unused"] * 3)   # Events() refuses risky tools
+        plan, _ = draft_plan(h, "g", "[risky_write_file] Write x.txt")
+        PlanRunner(h, plan, persistence=3).run()
+        t = plan.tasks[0]
+        self.assertEqual((t.status, t.attempts), ("failed", 1))
+        self.assertIn("refused (risky_write_file)", t.result)
+
+    def test_checks_are_text_to_edit(self):
+        h = self.harness()
+        text = ("1. [none] Write hello.py\n   print a greeting\n   check: [safe_read_file] hello.py exists\n"
+                "2. [none] Report (after: 1)")
+        plan, warnings = draft_plan(h, "g", text)
+        self.assertEqual((plan.tasks[0].detail, len(plan.tasks[0].checks)), ("print a greeting", 1))
+        self.assertEqual((plan.tasks[0].checks[0].tool, warnings), ("safe_read_file", []))
+        self.assertEqual(plan_text(plan), text)                                    # round trip
+        self.assertEqual(h.plans.load(plan.id).tasks[0].checks[0].task, "hello.py exists")
+        plan.tasks[0].checks[0].status = "done"
+        edit_plan(h, plan, "", text + "\n   check: [nope] it runs")
+        self.assertEqual([c.status for c in plan.tasks[1].checks], ["pending"])
+        self.assertEqual(plan.tasks[1].checks[0].tool, "none")                     # unknown tool
+
+    def test_checks_are_proposed_only_when_asked(self):
+        h = self.harness()
+        plan, _ = create_plan(h, "inventory the workspace")
+        self.assertNotIn("CHECK", self.backend.prompts[-1])                        # planning never mentions them
+        expand(h, plan, [1], parallel=False)
+        self.assertEqual(plan.tasks[0].checks, [])
+        expand(h, plan, [1], parallel=False, checks=True)
+        self.assertIn("CHECK: [tool] what to verify", self.backend.prompts[-1])
+        self.assertEqual([(c.tool, c.task) for c in plan.tasks[0].checks],
+                         [("safe_list_files", "the workspace lists the expected files")])
+        self.assertNotIn("CHECK", plan.tasks[0].detail)
+        expand(h, plan, [1], parallel=False, checks=True)
+        self.assertEqual(len(plan.tasks[0].checks), 1)                             # no duplicates

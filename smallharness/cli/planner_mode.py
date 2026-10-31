@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from .. import ui
 from ..planning import (
+    PERSISTENCE_MAX,
     Plan,
     PlanRunner,
     create_plan,
     draft_plan,
     edit_plan,
+    clamp_persistence,
     expand,
     plan_text,
 )
@@ -19,7 +21,9 @@ HELP = [
     ("/plans, /load ID", "saved plans; open one"),
     ("/draft", "write a plan yourself (no model)"),
     ("/edit [ID]", "edit the plan and its details as text ($EDITOR, or typed)"),
-    ("/expand [N,M|all] [times=K]", "one more pass of detail for those steps (all by default)"),
+    ("/expand [N,M|all] [times=K] [checks]", "one more pass of detail for those steps (all by default);"
+                                            " `checks`: also propose checks"),
+    ("/persist [0-10|max]", "how many times a failed step is tried again, each from a clean context"),
     ("/run [fresh|continuous] [parallel]", "carry out the plan (risky tools ask first)"),
     ("/tools", "the tools plan runs can use"),
 ]
@@ -61,7 +65,7 @@ class PlannerShell(Shell):
         """The plan as text: a GOAL line, then a line per step with its details indented."""
         from ..notemode import write_text
         print(ui.dim("  GOAL: on the first line; then one step per line, N. [tool] what to do (after: N),"
-                     " with its details on indented lines below it."
+                     " with its details on indented lines below it, and checks as `check: [tool] …` lines."
                      + (" Unchanged steps keep their status." if plan else "")))
         print(ui.dim("  tools: none, " + ", ".join(self.h.tools.tools)))
         initial = f"GOAL: {plan.goal}\n\n{plan_text(plan)}\n" if plan else "GOAL: \n\n"
@@ -94,14 +98,18 @@ class PlannerShell(Shell):
 
     def show(self) -> None:
         p = self.plan
-        print(ui.accent(ui.bold(f"PLAN {p.id}")) + f"  {p.goal}")
+        print(ui.accent(ui.bold(f"PLAN {p.id}")) + f"  {p.goal}" + ui.dim(f"  · persistence {persistence_label(p)}"))
         for t in p.tasks:
             depth = ui.dim(f"  ·{'·' * (t.depth - 1)} pass {t.depth}") if t.depth else ""
             print(t.line() + depth)
             for ln in t.detail.splitlines():
                 print(ui.steel(f"      {ln}"))
+            for c in t.checks:
+                mark = {"done": ui.ok("✓"), "failed": ui.err("!")}.get(c.status, " ")
+                print(f"      {mark} " + ui.sky(c.line()) + (ui.dim(f"  -> {c.result}") if c.result else ""))
             if t.result:
-                print(ui.dim(f"      -> {t.result}"))
+                tries = f" (attempt {t.attempts})" if t.attempts > 1 else ""
+                print(ui.dim(f"      -> {t.result}{tries}"))
 
     def cmd_show(self, _):
         if self._current():
@@ -133,9 +141,18 @@ class PlannerShell(Shell):
         for i in range(times):
             label = f"expanding (pass {i + 1} of {times})" if times > 1 else "expanding"
             with self.busy(label):
-                expand(self.h, plan, nums, on_end=lambda t: setattr(self.ev.spinner, "label",
-                                                                    f"{label}: step {t.num} done"))
+                expand(self.h, plan, nums, checks="checks" in words,
+                       on_end=lambda t: setattr(self.ev.spinner, "label", f"{label}: step {t.num} done"))
         self.show()
+
+    def cmd_persist(self, arg):
+        plan = self._current()
+        if not plan:
+            return
+        if arg.strip():
+            plan.persistence = PERSISTENCE_MAX if arg.strip().lower() == "max" else clamp_persistence(arg.strip())
+            self.h.plans.save(plan)
+        print(f"  persistence {persistence_label(plan)}")
 
     # ------------------------------------------------------------- running
     def cmd_run(self, arg):
@@ -145,6 +162,7 @@ class PlannerShell(Shell):
         words = arg.split()
         mode = next((w for w in words if w in ("fresh", "continuous")), self.h.cfg["plan"]["default_mode"])
         runner = PlanRunner(self.h, plan, mode, self.ev, parallel=("parallel" in words) or None)
+        print(ui.dim(f"  persistence {persistence_label(plan)}"))
 
         def start(t):
             print(ui.accent(f"▶ task {t.num}: {t.task}") + ui.dim(f"  [{t.tool}] · {mode} context"))
@@ -153,7 +171,7 @@ class PlannerShell(Shell):
         def end(t):
             self.ev.spinner.stop()
             self.ev.on_text_end()
-            text = f"{t.status.upper()}: {t.result}"
+            text = f"{t.status.upper()}: {t.result}" + (f" (attempt {t.attempts})" if t.attempts > 1 else "")
             print("  " + (ui.ok(f"✓ {text}") if t.status == "done" else
                           ui.err(text) if t.status == "failed" else ui.pale(f"– {text}")))
 
@@ -165,3 +183,11 @@ class PlannerShell(Shell):
         finally:
             self.ev.spinner.stop()
         print(ui.box(plan.render(results=True).splitlines(), "Plan result", ui.deep))
+
+
+def persistence_label(plan: Plan) -> str:
+    if plan.persistence >= PERSISTENCE_MAX:
+        return "max: a failed step is tried again until it succeeds or you stop the run (Ctrl-C)"
+    if not plan.persistence:
+        return "0: a failed step is not tried again"
+    return f"{plan.persistence}: a failed step is tried up to {plan.persistence} more time(s)"

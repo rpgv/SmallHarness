@@ -31,33 +31,56 @@ _TOKEN = re.compile(r"[A-Za-z0-9]+")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 STOPWORDS = frozenset(
     "a an and are as at be by for from has have in is it its of on or that the this to was were "
-    "will with what how why when where which who do does did can i you we they".split())
+    "will with what how why when where which who do does did can i you we they not".split())
 
 SKIP_DIRS = {".git", ".smallharness", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
 
-INDEX_VERSION = 2  # bump when terms() changes; older indexes are re-tokenized on load
+INDEX_VERSION = 3  # bump when terms() changes; older indexes are re-tokenized on load
 K1, B = 1.5, 0.75   # BM25
 RRF_K = 60          # Reciprocal Rank Fusion constant
+_VOWEL = re.compile(r"[aeiouy]")
 
 
 def stem(w: str) -> str:
-    """A light suffix stripper, so "deployed", "deploying" and "deploys" match "deploy"."""
-    if len(w) > 4 and w.endswith("ies"):
-        return w[:-3] + "y"
-    for suffix in ("ing", "ed"):
-        if w.endswith(suffix) and len(w) - len(suffix) >= 4:
-            return w[:-len(suffix)]
-    if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
-        return w[:-1]
-    return w
+    """A light suffix stripper that brings every form of a word to the same stem:
+    "deploy", "deploys", "deployed" and "deploying" all give "deploy"; "complex" and
+    "complexes", "run", "runs" and "running", "use", "uses" and "used" match too."""
+    if len(w) > 4 and w.endswith(("ies", "ied")):
+        w = w[:-3] + "y"
+    elif len(w) > 5 and w.endswith("sis"):           # analysis, like analyses
+        w = w[:-2]
+    elif w.endswith(("sses", "xes", "ches", "shes", "zzes")):
+        w = w[:-2]
+    elif len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+        w = w[:-1]
+    for _ in range(2):   # twice, so "embedded" and "needed" reach the stem of "embed" and "need"
+        for suffix in ("ing", "ed"):
+            base = w[:-len(suffix)]
+            if w.endswith(suffix) and len(base) >= 2 and _VOWEL.search(base):
+                w = _undouble(base)
+                break
+        else:
+            break
+    while len(w) >= 3 and w.endswith("e"):            # use, uses, used, using: "us"
+        w = w[:-1]
+    return _undouble(w)
+
+
+def _undouble(w: str) -> str:
+    """running, run; but fall and pass keep theirs."""
+    return w[:-1] if len(w) >= 3 and w[-1] == w[-2] and w[-1] not in "aeiouylsz" else w
 
 
 def terms(text: str) -> list[str]:
+    """Lowercase stemmed words, stopwords dropped. An identifier written in camel case
+    gives its parts and the whole word, so "BamA" finds "BamA" before "BAM", and
+    "getUser" finds both "getUser" and "user"."""
     out = []
-    for word in _TOKEN.findall(_CAMEL.sub(" ", text)):
-        w = word.lower()
-        if w not in STOPWORDS and len(w) > 1:
-            out.append(stem(w))
+    for word in _TOKEN.findall(text):
+        parts = _CAMEL.sub(" ", word).split()
+        for w in [p.lower() for p in parts] + ([word.lower()] if len(parts) > 1 else []):
+            if w not in STOPWORDS and len(w) > 1:
+                out.append(stem(w))
     return out
 
 

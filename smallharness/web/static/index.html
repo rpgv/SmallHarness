@@ -22,16 +22,67 @@
 </header>
 
 <nav class="tabs" id="tabs">
-  <button data-view="research" class="active">Research</button>
+  <button data-view="chat" class="active">Chat</button>
+  <button data-view="research">Research</button>
+  <button data-view="notes">Notes</button>
   <button data-view="planner">Planner</button>
-  <button data-view="recipes">Recipes</button>
   <button data-view="models">Models</button>
   <button data-view="settings">Settings</button>
+  <div class="relics-nav">
+    <button data-view="relics" title="files your plans made">Relics</button>
+    <ul id="relic-nav" class="relic-nav"></ul>
+  </div>
 </nav>
 
 <main>
+  <!-- Chat ---------------------------------------------------------------- -->
+  <section id="view-chat" class="view active">
+    <div id="chat-layout" class="chat-layout">
+      <aside class="chat-side">
+        <div class="row"><strong class="grow">Chats</strong><button id="chat-new" class="small">New</button></div>
+        <ul id="chat-list" class="list"></ul>
+      </aside>
+
+      <div class="chat-main">
+        <div class="row chat-head">
+          <input id="chat-title" class="grow" placeholder="New chat" title="the chat's name: edit to rename">
+          <span id="chat-meter" class="muted" title="how much of the window the last reply's context used"></span>
+          <button id="chat-delete" class="small link" title="delete this chat" hidden>delete</button>
+        </div>
+        <div id="chat-pins" class="attached" hidden></div>
+        <details id="chat-summary" class="summary" hidden><summary>earlier turns, folded into a summary</summary>
+          <pre class="out"></pre></details>
+        <div id="chat-messages" class="messages" aria-live="polite"></div>
+        <div id="chat-suggest" class="suggest" hidden></div>
+        <form id="chat-form" class="composer">
+          <textarea id="chat-input" rows="2" placeholder="Message… (start with /read PATH, /ask, /agent … to bring in a tool)"
+                    title="Enter sends; Shift+Enter starts a new line; Tab completes a command"></textarea>
+          <button type="submit" id="chat-send">Send</button>
+        </form>
+        <details class="chat-help"><summary>The model has no tools unless a message starts with a command line,
+          e.g. <code>/read src/app.py</code>, then your question on the next line.</summary>
+          <table class="table params"><tbody id="chat-commands"></tbody></table></details>
+      </div>
+
+      <aside id="chat-thread" class="chat-thread" hidden>
+        <div class="row"><strong id="thread-title" class="grow">Thread</strong>
+          <button id="thread-close" class="small link" title="close the thread">close</button></div>
+        <p class="hint">Replies here see this message, the question it answered, the thread, and the pins:
+          not the rest of the chat.</p>
+        <details id="thread-summary" class="summary" hidden><summary>earlier in the thread, folded</summary>
+          <pre class="out"></pre></details>
+        <div id="thread-messages" class="messages"></div>
+        <form id="thread-form" class="composer">
+          <textarea id="thread-input" rows="2" placeholder="Reply in the thread…"
+                    title="Enter sends; Shift+Enter starts a new line"></textarea>
+          <button type="submit" id="thread-send">Reply</button>
+        </form>
+      </aside>
+    </div>
+  </section>
+
   <!-- Research ------------------------------------------------------------ -->
-  <section id="view-research" class="view active">
+  <section id="view-research" class="view">
     <div class="subtabs" id="research-tabs">
       <button data-pane="ask" class="active">Ask</button>
       <button data-pane="bibliography">Bibliography</button>
@@ -44,7 +95,7 @@
     <div id="pane-ask" class="rpane active">
       <aside class="notes-side">
         <div class="row"><strong class="grow">Notes</strong>
-          <button id="note-new" class="small">New</button></div>
+          <button id="research-note-new" class="small" title="write a note in the Notes tab">New</button></div>
         <ul id="notes" class="list plain"></ul>
       </aside>
 
@@ -90,21 +141,33 @@
       </div>
     </div>
 
-    <dialog id="note-dialog" class="note-dialog">
-      <div class="row">
-        <strong id="note-title" class="grow">New note</strong>
-        <span id="note-meta" class="muted"></span>
+  </section>
+
+  <!-- Notes --------------------------------------------------------------- -->
+  <section id="view-notes" class="view">
+    <div class="split">
+      <aside class="side">
+        <div class="row"><strong class="grow">Notes</strong><button id="note-new" class="small">New</button></div>
+        <input id="note-q" type="search" placeholder="Search notes…" class="full">
+        <div id="note-tags" class="chips"></div>
+        <ul id="note-list" class="list"></ul>
+      </aside>
+      <div class="pane">
+        <div class="row">
+          <strong id="note-title" class="grow">New note</strong>
+          <span id="note-meta" class="muted"></span>
+        </div>
+        <p class="hint">Notes are part of the knowledge base: Research answers from them. <code>#tags</code> are
+          optional. Ctrl+S saves.</p>
+        <textarea id="note-text" class="editor" placeholder="Write a note… #idea"></textarea>
+        <div class="row">
+          <button id="note-save">Save</button>
+          <span id="note-status" class="muted"></span>
+          <span class="grow"></span>
+          <button id="note-delete" class="danger" hidden>Delete</button>
+        </div>
       </div>
-      <p class="hint">Notes are part of the knowledge base. <code>#tags</code> are optional.</p>
-      <textarea id="note-text" class="editor" placeholder="Write a note… #idea"></textarea>
-      <div class="row">
-        <button id="note-save">Save</button>
-        <button id="note-close" class="secondary">Close</button>
-        <span id="note-status" class="muted"></span>
-        <span class="grow"></span>
-        <button id="note-delete" class="danger" hidden>Delete</button>
-      </div>
-    </dialog>
+    </div>
   </section>
 
   <!-- Planner ------------------------------------------------------------- -->
@@ -125,11 +188,18 @@
         <div id="plan-editor" class="stack" hidden>
           <h2 id="plan-editor-title">Draft a plan</h2>
           <input id="plan-edit-goal" placeholder="Goal">
-          <textarea id="plan-edit-text" class="editor" spellcheck="false"
-                    placeholder="1. [safe_read_file] Read the CLI&#10;   details of step 1, indented&#10;2. [none] Add --verbose (after: 1)"></textarea>
-          <p class="hint">One step per line: <code>N. [tool] what to do (after: N)</code>; its details on the
-            indented lines below it. A step you leave unchanged keeps its status.</p>
-          <p id="plan-edit-tools" class="hint"></p>
+          <div id="plan-rows" class="plan-rows"></div>
+          <div class="row" id="plan-rows-bar">
+            <button id="plan-add-step" class="small secondary">+ step</button>
+            <span class="hint grow">Pick each step's tool, then say what to do; end with <code>(after: N)</code> to
+              wait for step N. A check runs after its step succeeds; if it fails, the step is done again.</span>
+          </div>
+          <textarea id="plan-edit-text" class="editor" spellcheck="false" hidden
+                    placeholder="1. [safe_read_file] Read the CLI&#10;   details of step 1, indented&#10;   check: [safe_read_file] the parser is found&#10;2. [none] Add --verbose (after: 1)"></textarea>
+          <p id="plan-text-hint" class="hint" hidden>One step per line: <code>N. [tool] what to do (after: N)</code>; its
+            details on the indented lines below it, and checks as <code>check: [tool] what to verify</code>.</p>
+          <p class="hint">A step you leave unchanged keeps its status.
+            <button id="plan-edit-mode" class="small link">edit as text</button></p>
           <div class="row">
             <button id="plan-edit-save">Save plan</button>
             <button id="plan-edit-cancel" class="secondary">Cancel</button>
@@ -137,13 +207,20 @@
         </div>
         <div id="plan-detail" hidden>
           <div class="row"><h2 id="plan-goal-text" class="grow"></h2>
-            <button id="plan-edit" class="small secondary">Edit</button></div>
+            <button id="plan-edit" class="small secondary">Edit</button>
+            <button id="plan-delete" class="small danger">Delete</button></div>
+          <div class="row">
+            <span class="hint grow">Tick a step to mark it done; untick it and the next run does it again.</span>
+            <button id="plan-untick" class="small link" title="every step pending again">untick all</button>
+          </div>
           <ol id="plan-tasks" class="tasks"></ol>
           <div class="runbar">
             <strong>Expand</strong>
             <label>steps <input id="expand-steps" placeholder="all" class="num-wide"></label>
             <label>passes <input id="expand-times" type="number" min="1" max="5" value="1" class="num"></label>
             <label class="check"><input type="checkbox" id="expand-parallel" checked> parallel</label>
+            <label class="check" title="the model may add up to 3 checks per step; a failed check repeats its step">
+              <input type="checkbox" id="expand-checks"> propose checks</label>
             <button id="expand-btn" class="secondary">Expand</button>
           </div>
           <div class="runbar">
@@ -156,58 +233,44 @@
               <input type="checkbox" id="run-parallel"> parallel</label>
             <button id="run-btn">Run</button>
           </div>
+          <div class="runbar">
+            <strong>Persistence</strong>
+            <input id="run-persist" type="range" min="0" max="10" step="1" value="0" class="gauge"
+                   title="how many times a failed step is tried again; at the top, until it succeeds or you Stop">
+            <span id="run-persist-label" class="muted"></span>
+          </div>
           <p class="hint">Runs use the workspace tools; risky ones ask you first. They see the plan, the step's
-            details and earlier results; nothing from the knowledge base.</p>
+            details and earlier results; nothing from the knowledge base. A retry starts from a clean context
+            holding only the step and what went wrong last time.</p>
           <div id="run-log" class="log"></div>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- Recipes ------------------------------------------------------------- -->
-  <section id="view-recipes" class="view">
+  <!-- Relics -------------------------------------------------------------- -->
+  <section id="view-relics" class="view">
     <div class="split">
       <aside class="side">
-        <div class="row"><strong class="grow">Recipes</strong><button id="recipe-new" class="small">New</button></div>
-        <ul id="recipe-list" class="list"></ul>
+        <p class="hint">Files your plans wrote. Forgetting one takes it off this list; the file stays.</p>
+        <ul id="relic-list" class="list"></ul>
       </aside>
       <div class="pane">
-        <p class="hint">A recipe is turned into a file one section at a time. Separate sections with an empty
-          line and describe in each what to write. Every section is written by its own model call that sees only
-          that section; its only tool is <code>risky_write_file</code>, which you allow once.</p>
-        <div class="row">
-          <input id="recipe-name" placeholder="name" class="num-wide">
-          <span class="muted">→</span>
-          <input id="recipe-target" placeholder="file to write, e.g. src/shapes.py or docs/intro.md">
-          <select id="recipe-mode" title="code: functions and classes · text: Markdown paragraphs">
-            <option value="">by file type</option>
-            <option value="code">code</option>
-            <option value="text">text (Markdown)</option>
-          </select>
-        </div>
-        <textarea id="recipe-text" class="editor" spellcheck="false"
-                  placeholder="area(radius: float) -> float&#10;returns the area of a circle, using math.pi&#10;&#10;class Circle&#10;holds a radius; method area() -> float uses area()"></textarea>
-        <div class="row">
-          <button id="recipe-save" class="secondary">Save</button>
-          <button id="recipe-run">Write</button>
-          <label class="check" title="also rewrite sections that are already written"><input type="checkbox" id="recipe-all"> all sections</label>
-          <label class="check" title="several sections at once, as RAM allows"><input type="checkbox" id="recipe-parallel"> parallel</label>
-          <span id="recipe-status" class="muted"></span>
-          <span class="grow"></span>
-          <button id="recipe-delete" class="danger" hidden>Delete</button>
-        </div>
-        <ol id="recipe-sections" class="tasks"></ol>
-        <div id="recipe-log" class="log"></div>
-        <div class="card library-card">
-          <h3>Code library</h3>
-          <p class="hint">Code mode keeps each section as a snippet, one library per language. Before a section is
-            written, its library is searched: a near-duplicate is reused without the model, and similar snippets are
-            offered to it.</p>
+        <div id="relic-empty" class="hint">Pick a relic from the list.</div>
+        <div id="relic-detail" hidden>
           <div class="row">
-            <select id="library-lang"></select>
-            <input id="library-q" type="search" placeholder="Search snippets…">
+            <h2 id="relic-title" class="grow"></h2>
+            <span id="relic-meta" class="muted"></span>
           </div>
-          <ul id="snippet-list" class="list plain"></ul>
+          <p id="relic-note" class="hint"></p>
+          <textarea id="relic-text" class="editor" spellcheck="false"></textarea>
+          <div class="row">
+            <button id="relic-save">Save</button>
+            <button id="relic-revert" class="secondary" title="load the file again; unsaved changes are lost">Revert</button>
+            <span id="relic-status" class="muted"></span>
+            <span class="grow"></span>
+            <button id="relic-forget" class="small secondary" title="take it off the list; the file stays">Forget</button>
+          </div>
         </div>
       </div>
     </div>
@@ -231,6 +294,11 @@
 
   <!-- Settings ------------------------------------------------------------ -->
   <section id="view-settings" class="view">
+    <div class="subtabs" id="settings-tabs">
+      <button data-pane="config" class="active">Settings</button>
+      <button data-pane="tools">Tools</button>
+    </div>
+    <div id="spane-config" class="spane active">
     <div class="card">
       <h3>Status</h3>
       <dl id="status-list" class="kv"></dl>
@@ -246,9 +314,16 @@
       <p class="hint">Changes apply to this run; put them in smallharness.toml to keep them.</p>
       <table class="table config"><tbody id="config-rows"></tbody></table>
     </div>
+    </div>
+    <div id="spane-tools" class="spane">
     <div class="card">
-      <h3>Planner tools</h3>
-      <table class="table"><tbody id="tool-rows"></tbody></table>
+      <h3>Tools <span id="tool-count" class="muted"></span></h3>
+      <p class="hint">What plan runs may call. Risky tools ask you before each
+        call. Add your own in <code>.smallharness/tools/</code> or <code>[tools].extra_dirs</code>.</p>
+      <p id="tool-warnings" class="error" hidden></p>
+      <table class="table"><thead><tr><th>Name</th><th>Runs</th><th>Description</th><th>Arguments</th></tr></thead>
+        <tbody id="tool-rows"></tbody></table>
+    </div>
     </div>
   </section>
 </main>

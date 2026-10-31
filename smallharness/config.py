@@ -79,11 +79,7 @@ DEFAULTS: dict[str, Any] = {
     "plan": {
         "default_mode": "fresh",      # fresh | continuous
         "parallel": False,            # run independent tasks on several instances
-    },
-    "recipe": {
-        "library": True,              # code mode: keep each section in the code library, and reuse from it
-        "reuse_similarity": 0.85,     # a section this alike (shared words) to a snippet's reuses it, no model call
-        "library_k": 3,               # similar snippets shown to the model, which may reuse one
+        "persistence": 2,             # new plans: retries per failed task, 0-10 (10: until it succeeds or is stopped)
     },
     "research": {
         "k": 6,                       # excerpts found per question

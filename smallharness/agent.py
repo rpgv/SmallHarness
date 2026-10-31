@@ -12,9 +12,11 @@ from .config import Config, changed_keys
 from .context import ContextManager, RagStore, Session
 from .context.manager import Built, extractive_summary
 from .engines import make_embedder_for
+from .errors import HarnessError
 from .notes import NoteStore
 from .plans import PlanStore
 from .pool import ModelPool
+from .relics import WRITE_TOOLS, RelicStore
 from .tokens import TokenCounter
 from .toolcall import ToolCallError, parse_tool_call
 from .tools import Tool, ToolContext, ToolOutcome, ToolRegistry
@@ -79,8 +81,10 @@ class Harness:
         self.project_rag = RagStore(state.project_rag, self.embedder)
         self.notes = NoteStore.for_workspace(state, self.project_rag)
         self.plans = PlanStore(state.plans)
+        self.relics = RelicStore(state.relics, cfg.workspace)
         self.auto_tools = cfg["tools"]["auto"]
         self._permit_lock = threading.Lock()
+        self._chats = None
         self.open_session(Session(state.sessions))
         state.prune_session_indexes(int(cfg["rag"].get("session_index_days", 30)), self.session.id)
 
@@ -330,15 +334,31 @@ class Harness:
                 return events.permit(tool, a)
 
         events.on_tool_call(name, args)
-        outcome = self.tools.execute(name, args, tool_ctx or self.tool_context(), permit,
-                                     self.cfg["tools"]["max_result_chars"])
+        tool_ctx = tool_ctx or self.tool_context()
+        outcome = self.tools.execute(name, args, tool_ctx, permit, self.cfg["tools"]["max_result_chars"])
+        origin = tool_ctx.extra.get("origin")     # a plan run: the files it writes are relics
+        if origin and outcome.ok and name in WRITE_TOOLS and isinstance(args.get("path"), str):
+            try:
+                self.relics.record(args["path"], origin)
+            except HarnessError:
+                pass
         events.on_tool_result(outcome)
         return outcome
+
+    @property
+    def chats(self):
+        """Chat mode's conversations (chat.py)."""
+        if self._chats is None:
+            from .chat import ChatStore
+            self._chats = ChatStore(self)
+        return self._chats
 
     def agent(self, ctx: ContextManager | None = None, events: Events | None = None) -> "Agent":
         return Agent(self, ctx or self.ctx, events or self.events)
 
     def close(self) -> None:
+        if self._chats is not None:
+            self._chats.close()
         self.pool.close()
         self.project_rag.close()
         self.session_rag.close()
