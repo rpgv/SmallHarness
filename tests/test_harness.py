@@ -325,6 +325,19 @@ class Rag(unittest.TestCase):
             self.assertEqual(len(store.search("deployment", k=8)), 4)  # a word in every chunk
             self.assertEqual(store.search("kubernetes"), [])
 
+    def test_every_word_form_reaches_one_stem(self):
+        from smallharness.context.rag import terms
+        for forms in ("complex complexes", "run runs running", "use uses used using", "analysis analyses",
+                      "embed embeds embedded embedding", "study studies studied", "agree agreed agreeing"):
+            self.assertEqual(len({tuple(terms(w)) for w in forms.split()}), 1, forms)
+
+    def test_camel_case_identifiers_match_whole(self):
+        store = RagStore(None)
+        store.add_text("bam.md", "The BAM complex has five subunits.\n" * 3)
+        store.add_text("bama.md", "BamA is the barrel at the core of it.")
+        self.assertEqual(store.search("What is BamA?")[0].source, "bama.md")
+        self.assertEqual(store.search("bama")[0].source, "bama.md")
+
     def test_deleted_files_leave_the_index(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "src"
