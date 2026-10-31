@@ -12,29 +12,27 @@
   ones above the question box, a speed line, and files and notes with checkboxes for
   the scope) and *Bibliography* (each reference, and its excerpt).
 - **Notes**: write, search, filter by `#tag`, edit and delete notes.
-- **Planner**: create, draft or edit plans with their details; expand (which steps, how
-  many passes, parallel); run fresh or continuous. Tick a step to mark it done, or
+- **Planner**: create, draft or edit plans, a row per step (a tool dropdown, then what
+  to do) with its details and checks, or as text; expand (which steps, how many passes,
+  parallel, whether to propose checks); run fresh or continuous, with the
+  [persistence](planner.md) gauge. Tick a step to mark it done, or
   untick it (or *untick all*) so the next run does it again. Delete a plan from its
   page or with the ✕ in the list.
-- **Recipes**: write, save and run recipes, code or text, optionally in parallel.
-  Untick a section and the next Write writes it again. Delete a recipe with the ✕ in
-  the list.
 - **Models**: use, pull with progress, delete.
 - **Settings**, with two sub-tabs: *Settings* (status, every setting) and *Tools*
   (each tool, whether it asks first, and its arguments).
 
 ## Relics
-Under the tabs, **Relics** lists the files recipes and plans wrote, newest first
+Under the tabs, **Relics** lists the files plans wrote, newest first
 (kept in `.smallharness/relics.json`). Open one to edit and save it; *Forget* takes it
-off the list and leaves the file. A recipe's next Write rebuilds its whole file, so
-edits made by hand there are replaced.
+off the list and leaves the file.
 
 ## Running
 The model loads when first needed; `--load` loads it before the page opens. **Stop**
 ends whatever the model is doing; risky tools ask in a dialog. Model work runs one
 request at a time.
 
-Plan runs, expansions, recipe runs and chat replies work in the background on the
+Plan runs, expansions and chat replies work in the background on the
 server. Reloading the page, closing it, or a phone putting the browser to sleep does
 not stop them: the page picks the run up again, log and all, and a page opened later
 (or on another device) joins it too. Only **Stop** ends a run early.

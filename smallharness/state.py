@@ -31,18 +31,9 @@ class StateDir:
         return self._dir("plans")
 
     @property
-    def recipes(self) -> Path:
-        return self._dir("recipes")
-
-    @property
     def research(self) -> Path:
         """Each research session's bibliography (temporary: removed with old sessions)."""
         return self._dir("research")
-
-    @property
-    def snippets(self) -> Path:
-        """Recipes' code library, one folder per language (snippets.py)."""
-        return self._dir("snippets")
 
     @property
     def library(self) -> Path:
@@ -60,7 +51,7 @@ class StateDir:
 
     @property
     def relics(self) -> Path:
-        """The files recipes and plans wrote (relics.py)."""
+        """The files plans wrote (relics.py)."""
         self._dir("")
         return self.root / "relics.json"
 

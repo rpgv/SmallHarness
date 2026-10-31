@@ -1,4 +1,4 @@
-"""What plan tasks and recipe sections share: a status that goes pending -> running ->
+"""A plan task's status goes pending -> running ->
 done or failed. When a run is stopped part-way, the step that was running goes back
 to pending, so the next run starts it again."""
 from __future__ import annotations

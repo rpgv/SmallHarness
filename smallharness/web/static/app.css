@@ -98,7 +98,7 @@ a { color: var(--blue); }
 .tabs button:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
 .tabs button.active { color: var(--red); border-left-color: var(--red); background: var(--red-soft); }
 .tabs button.active::before { content: "> "; }
-/* relics: below the tabs, the files recipes and plans made */
+/* relics: below the tabs, the files plans made */
 .relics-nav { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--blue-dim); display: flex; flex-direction: column; gap: 2px; min-height: 0; }
 .relic-nav { list-style: none; margin: 0; padding: 0 0 0 16px; display: grid; gap: 1px; }
 .relic-nav li { font-size: 12px; padding: 2px 8px 2px 12px; color: var(--muted); cursor: pointer; overflow: hidden;
@@ -257,7 +257,7 @@ pre.ref { max-height: none; white-space: pre-wrap; }
 .chip.active { background: var(--blue); border-color: var(--blue); color: #000; }
 .editor { width: 100%; min-height: 50vh; line-height: 1.6; }
 
-/* plans and recipes: a tick per step or section, a remove button per list item */
+/* plans: a tick per step, a remove button per list item */
 .tick { margin: 0; align-self: center; cursor: pointer; }
 .tick:disabled { cursor: default; }
 .list > li.item { display: flex; gap: 6px; align-items: flex-start; }
@@ -283,6 +283,21 @@ pre.ref { max-height: none; white-space: pre-wrap; }
 .status.done { color: var(--ok); border-color: var(--ok); } .status.failed { color: var(--err); border-color: var(--err); }
 .status.running { color: var(--red); border-color: var(--red); } .status.skipped { color: var(--muted); }
 .runbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.gauge { width: 180px; accent-color: var(--red); }
+.tasks .check-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 12.5px; margin: 4px 0 0 18px; }
+.tasks .check-line .mark { width: 1ch; color: var(--muted); }
+.tasks .check-line.done .mark { color: var(--ok); } .tasks .check-line.failed .mark { color: var(--err); }
+
+/* the plan editor: a row per step (tool, what to do), its details and checks below */
+.plan-rows { display: grid; gap: 8px; }
+.step-row { border: 1px solid var(--line); border-left: 2px solid var(--blue-dim); border-radius: var(--radius);
+            padding: 8px 10px; background: var(--bg); display: grid; gap: 6px; }
+.step-main, .check-row { display: grid; grid-template-columns: auto minmax(110px, 190px) 1fr auto auto auto auto;
+                         gap: 8px; align-items: center; }
+.check-row { grid-template-columns: auto minmax(110px, 190px) 1fr auto; margin-left: 24px; }
+.step-main .num { min-width: 2.5ch; color: var(--red); }
+.step-detail { width: 100%; min-height: 2.6em; font-size: 12.5px; resize: vertical; }
+.checks { display: grid; gap: 6px; }
 .log {
   margin-top: 10px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 40vh; overflow: auto; background: #000; border: 1px solid var(--line); border-radius: var(--radius); padding: 0 10px;
@@ -354,6 +369,10 @@ dialog::backdrop { background: rgb(0 0 0 / .7); }
   .busy { margin-left: 0; }
   #model-meta { display: none; }
   .editor { min-height: 40vh; }
+  .step-main { display: flex; flex-wrap: wrap; }
+  .step-main .tool-pick { flex: 1 1 140px; }
+  .step-main .what { flex: 1 1 100%; order: 1; }
+  .step-main button { order: 2; }
+  .check-row { grid-template-columns: auto 1fr auto; margin-left: 12px; }
+  .check-row .what { grid-column: 1 / -1; grid-row: 2; }
 }
-.library-card { margin-top: 16px; }
-.library-card pre.out { margin-top: 6px; }

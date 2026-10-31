@@ -9,16 +9,7 @@ from typing import Any, Callable, Iterator
 
 from ..config import DEFAULTS, flatten, is_secret, parse_value
 from ..engines import engine
-from ..planning import PlanRunner, create_plan, draft_plan, edit_plan, expand
-from ..recipe import (
-    RecipeRunner,
-    list_recipes,
-    load_recipe,
-    load_saved,
-    mark_sections,
-    recipes_dir,
-    save_recipe,
-)
+from ..planning import PlanRunner, clamp_persistence, create_plan, draft_plan, edit_plan, expand
 from .app import ApiError, Job, WebApp, WebEvents
 
 # ------------------------------------------------------------------ routes
@@ -250,6 +241,17 @@ def delete_plan(app: WebApp, q, body, pid):
     return {"deleted": pid}
 
 
+@route("PUT", r"/api/plans/([\w-]+)/persistence")
+def put_plan_persistence(app: WebApp, q, body, pid):
+    """How many times a failed step is tried again (persistence_max: until it succeeds)."""
+    live = app.live("run", pid)
+    plan = live or app.load_plan(pid)
+    plan.persistence = clamp_persistence(body.get("persistence"))
+    if not live:                      # a running plan is saved by its run, after each step
+        app.h.plans.save(plan)
+    return app.plan_dict(plan)
+
+
 @route("PUT", r"/api/plans/([\w-]+)/steps")
 def put_plan_steps(app: WebApp, q, body, pid):
     """Tick steps off by hand, or untick them so the next run does them again
@@ -279,7 +281,9 @@ def post_run(app: WebApp, q, body, pid):
             ev.emit({"type": "task_end", "num": t.num, "status": t.status, "result": t.result,
                      "plan": app.plan_dict(plan)})
 
-        runner = PlanRunner(app.h, plan, mode, ev, parallel=bool(body.get("parallel")) or None)
+        persistence = body.get("persistence")
+        runner = PlanRunner(app.h, plan, mode, ev, parallel=bool(body.get("parallel")) or None,
+                            persistence=None if persistence is None else clamp_persistence(persistence))
         keep_going = bool(body.get("continue_on_failure"))
         runner.run(start, end, lambda t: keep_going)
         yield {"type": "done", "reason": "finished" if plan.finished else "stopped",
@@ -300,88 +304,10 @@ def post_expand(app: WebApp, q, body, pid):
         app.plan = job.subject = plan
         for i in range(times):
             ev.emit({"type": "status", "text": f"pass {i + 1} of {times}"})
-            expand(app.h, plan, steps, parallel=body.get("parallel", True) is not False,
+            expand(app.h, plan, steps, parallel=body.get("parallel", True) is not False, checks=bool(body.get("checks")),
                    on_end=lambda t: ev.emit({"type": "step", "num": t.num, "depth": t.depth, "detail": t.detail}))
         yield {"type": "done", "plan": app.plan_dict(plan), "state": app.state()}
     return app.start_job("expand", pid, "expanding a plan", produce)
-
-
-# --------------------------------------------------------------- recipes
-def _recipe_dict(recipe) -> dict:
-    from ..snippets import language_key, locate
-    found = locate(recipe.target) if recipe.mode == "code" else None
-    return dict(recipe.to_dict(), text=recipe.path.read_text(encoding="utf-8"),
-                library=language_key(found[0]) if found else None)
-
-
-@route("GET", "/api/recipes")
-def get_recipes(app: WebApp, q, body):
-    out = []
-    for name in list_recipes(app.h.cfg):
-        try:
-            r = load_recipe(app.h.cfg, recipes_dir(app.h.cfg) / f"{name}.md")
-        except ValueError as e:
-            out.append({"name": name, "target": "", "sections": 0, "done": 0, "error": str(e)})
-            continue
-        out.append({"name": name, "target": r.target, "mode": r.mode, "sections": len(r.sections),
-                    "done": r.written()})
-    return {"recipes": out}
-
-
-@route("GET", r"/api/recipes/([\w-]+)")
-def get_recipe(app: WebApp, q, body, name):
-    live = app.live("recipe", name)
-    if live:
-        return _recipe_dict(live)
-    return _recipe_dict(load_saved(app.h.cfg, name))
-
-
-@route("PUT", r"/api/recipes/([\w-]+)")
-def put_recipe(app: WebApp, q, body, name):
-    text = _need(body, "text")
-    save_recipe(app.h.cfg, name, text, str(body.get("target") or "").strip(), str(body.get("mode") or ""))
-    return _recipe_dict(load_saved(app.h.cfg, name))
-
-
-@route("DELETE", r"/api/recipes/([\w-]+)")
-def delete_recipe(app: WebApp, q, body, name):
-    if app.live("recipe", name):
-        raise ApiError(409, "a recipe is being written; wait for it to end")
-    r = load_saved(app.h.cfg, name)
-    r.path.unlink()
-    if r.cache:
-        r.cache.unlink(missing_ok=True)
-    return {"deleted": name}
-
-
-@route("PUT", r"/api/recipes/([\w-]+)/sections")
-def put_recipe_sections(app: WebApp, q, body, name):
-    """Untick sections so the next run writes them again, or tick them back
-    ('sections' empty: every section)."""
-    if app.live("recipe", name):
-        raise ApiError(409, "a recipe is being written; wait for it to end")
-    recipe = load_saved(app.h.cfg, name)
-    mark_sections(recipe, _numbers(body, "sections"), bool(body.get("done")))
-    return _recipe_dict(recipe)
-
-
-@route("POST", r"/api/recipes/([\w-]+)/run")
-def post_recipe_run(app: WebApp, q, body, name):
-    recipe = load_saved(app.h.cfg, name)
-    only = _numbers(body, "only") or None
-    runner = RecipeRunner(app.h, recipe, only=only, everything=bool(body.get("all")))
-
-    def produce(ev: WebEvents, job: Job) -> Iterator[dict]:
-        app.ensure_loaded(ev)
-        job.subject = recipe
-        runner.events = ev
-        res = runner.run(on_start=lambda s: ev.emit({"type": "section_start", "num": s.num, "text": s.text}),
-                         on_end=lambda s: ev.emit({"type": "section_end", "num": s.num, "status": s.status,
-                                                   "note": s.note, "code": s.code}),
-                         parallel=bool(body.get("parallel")))
-        yield {"type": "done", "reason": res.reason, "written": res.written, "failed": res.failed,
-               "recipe": _recipe_dict(recipe), "state": app.state()}
-    return app.start_job("recipe", name, "writing a recipe", produce)
 
 
 @route("GET", r"/api/jobs/(\w+)/events")
@@ -446,7 +372,7 @@ def post_chat_send(app: WebApp, q, body, cid):
 
     def produce(ev: WebEvents, job: Job) -> Iterator[dict]:
         job.subject = chat
-        if question or any(n in ("agent", "ask", "plan", "runplan", "recipe") for n, _ in commands):
+        if question or any(n in ("agent", "ask", "plan", "runplan") for n, _ in commands):
             app.ensure_loaded(ev)
         chat.send(text, thread, ev, on_message=lambda m: ev.emit({"type": "message", "message": asdict(m)}))
         yield {"type": "done", "chat": chat.to_dict(), "state": app.state()}
@@ -500,41 +426,6 @@ def delete_relic(app: WebApp, q, body):
     """Take a file off the list; the file itself stays."""
     app.h.relics.forget(q.get("path", ""))
     return {"relics": app.h.relics.all()}
-
-
-# ---------------------------------------------------------- code library
-def _library(app: WebApp, lang: str):
-    from ..snippets import open_library
-    lib = open_library(app.h.cfg, lang, app.h.embedder)
-    if lib is None:
-        raise ApiError(404, f"no code library for {lang!r}")
-    return lib
-
-
-@route("GET", "/api/snippets")
-def get_libraries(app: WebApp, q, body):
-    from ..snippets import libraries
-    return {"languages": [{"key": k, "snippets": len(_library(app, k).all())} for k in libraries(app.h.cfg)]}
-
-
-@route("GET", r"/api/snippets/(\w+)")
-def get_snippets(app: WebApp, q, body, lang):
-    lib = _library(app, lang)
-    query = q.get("q", "").strip()
-    found = lib.search(query, 20) if query else lib.all()
-    return {"language": lib.language, "snippets": [s.to_dict() for s in found]}
-
-
-@route("GET", r"/api/snippets/(\w+)/([\w-]+)")
-def get_snippet(app: WebApp, q, body, lang, sid):
-    lib = _library(app, lang)
-    return lib.get(sid).to_dict(lib.code(sid))
-
-
-@route("DELETE", r"/api/snippets/(\w+)/([\w-]+)")
-def delete_snippet(app: WebApp, q, body, lang, sid):
-    _library(app, lang).remove(sid)
-    return {"deleted": sid}
 
 
 # --------------------------------------------------------------- models

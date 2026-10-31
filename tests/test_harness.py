@@ -471,8 +471,9 @@ class Planning(Base):
         self.assertIn("do not write DONE in the same reply", task_prompt)
 
     def test_failed_dependency_skips(self):
-        _, plan = self._plan("fresh", ["FAILED: cannot list"])
+        _, plan = self._plan("fresh", ["FAILED: cannot list"] * 3)   # the first try and 2 retries (the default)
         self.assertEqual([t.status for t in plan.tasks], ["failed", "skipped"])
+        self.assertEqual(plan.tasks[0].attempts, 3)
 
     def test_saved_plan_is_editable_json(self):
         h, plan = self._plan("fresh", ["DONE: a", "DONE: b"])

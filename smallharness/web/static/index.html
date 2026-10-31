@@ -26,11 +26,10 @@
   <button data-view="research">Research</button>
   <button data-view="notes">Notes</button>
   <button data-view="planner">Planner</button>
-  <button data-view="recipes">Recipes</button>
   <button data-view="models">Models</button>
   <button data-view="settings">Settings</button>
   <div class="relics-nav">
-    <button data-view="relics" title="files your recipes and plans made">Relics</button>
+    <button data-view="relics" title="files your plans made">Relics</button>
     <ul id="relic-nav" class="relic-nav"></ul>
   </div>
 </nav>
@@ -189,11 +188,18 @@
         <div id="plan-editor" class="stack" hidden>
           <h2 id="plan-editor-title">Draft a plan</h2>
           <input id="plan-edit-goal" placeholder="Goal">
-          <textarea id="plan-edit-text" class="editor" spellcheck="false"
-                    placeholder="1. [safe_read_file] Read the CLI&#10;   details of step 1, indented&#10;2. [none] Add --verbose (after: 1)"></textarea>
-          <p class="hint">One step per line: <code>N. [tool] what to do (after: N)</code>; its details on the
-            indented lines below it. A step you leave unchanged keeps its status.</p>
-          <p id="plan-edit-tools" class="hint"></p>
+          <div id="plan-rows" class="plan-rows"></div>
+          <div class="row" id="plan-rows-bar">
+            <button id="plan-add-step" class="small secondary">+ step</button>
+            <span class="hint grow">Pick each step's tool, then say what to do; end with <code>(after: N)</code> to
+              wait for step N. A check runs after its step succeeds; if it fails, the step is done again.</span>
+          </div>
+          <textarea id="plan-edit-text" class="editor" spellcheck="false" hidden
+                    placeholder="1. [safe_read_file] Read the CLI&#10;   details of step 1, indented&#10;   check: [safe_read_file] the parser is found&#10;2. [none] Add --verbose (after: 1)"></textarea>
+          <p id="plan-text-hint" class="hint" hidden>One step per line: <code>N. [tool] what to do (after: N)</code>; its
+            details on the indented lines below it, and checks as <code>check: [tool] what to verify</code>.</p>
+          <p class="hint">A step you leave unchanged keeps its status.
+            <button id="plan-edit-mode" class="small link">edit as text</button></p>
           <div class="row">
             <button id="plan-edit-save">Save plan</button>
             <button id="plan-edit-cancel" class="secondary">Cancel</button>
@@ -213,6 +219,8 @@
             <label>steps <input id="expand-steps" placeholder="all" class="num-wide"></label>
             <label>passes <input id="expand-times" type="number" min="1" max="5" value="1" class="num"></label>
             <label class="check"><input type="checkbox" id="expand-parallel" checked> parallel</label>
+            <label class="check" title="the model may add up to 3 checks per step; a failed check repeats its step">
+              <input type="checkbox" id="expand-checks"> propose checks</label>
             <button id="expand-btn" class="secondary">Expand</button>
           </div>
           <div class="runbar">
@@ -225,62 +233,16 @@
               <input type="checkbox" id="run-parallel"> parallel</label>
             <button id="run-btn">Run</button>
           </div>
-          <p class="hint">Runs use the workspace tools; risky ones ask you first. They see the plan, the step's
-            details and earlier results; nothing from the knowledge base.</p>
-          <div id="run-log" class="log"></div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Recipes ------------------------------------------------------------- -->
-  <section id="view-recipes" class="view">
-    <div class="split">
-      <aside class="side">
-        <div class="row"><strong class="grow">Recipes</strong><button id="recipe-new" class="small">New</button></div>
-        <ul id="recipe-list" class="list"></ul>
-      </aside>
-      <div class="pane">
-        <p class="hint">A recipe is turned into a file one section at a time. Separate sections with an empty
-          line and describe in each what to write. Every section is written by its own model call that sees only
-          that section; its only tool is <code>risky_write_file</code>, which you allow once.</p>
-        <div class="row">
-          <input id="recipe-name" placeholder="name" class="num-wide">
-          <span class="muted">→</span>
-          <input id="recipe-target" placeholder="file to write, e.g. src/shapes.py or docs/intro.md">
-          <select id="recipe-mode" title="code: functions and classes · text: Markdown paragraphs">
-            <option value="">by file type</option>
-            <option value="code">code</option>
-            <option value="text">text (Markdown)</option>
-          </select>
-        </div>
-        <textarea id="recipe-text" class="editor" spellcheck="false"
-                  placeholder="area(radius: float) -> float&#10;returns the area of a circle, using math.pi&#10;&#10;class Circle&#10;holds a radius; method area() -> float uses area()"></textarea>
-        <div class="row">
-          <button id="recipe-save" class="secondary">Save</button>
-          <button id="recipe-run">Write</button>
-          <label class="check" title="also rewrite sections that are already written"><input type="checkbox" id="recipe-all"> all sections</label>
-          <label class="check" title="several sections at once, as RAM allows"><input type="checkbox" id="recipe-parallel"> parallel</label>
-          <span id="recipe-status" class="muted"></span>
-          <span class="grow"></span>
-          <button id="recipe-delete" class="danger" hidden>Delete</button>
-        </div>
-        <div class="row" id="recipe-tick-row" hidden>
-          <span class="hint grow">Untick a section and the next Write writes it again.</span>
-          <button id="recipe-untick" class="small link" title="every section is written again">untick all</button>
-        </div>
-        <ol id="recipe-sections" class="tasks"></ol>
-        <div id="recipe-log" class="log"></div>
-        <div class="card library-card">
-          <h3>Code library</h3>
-          <p class="hint">Code mode keeps each section as a snippet, one library per language. Before a section is
-            written, its library is searched: a near-duplicate is reused without the model, and similar snippets are
-            offered to it.</p>
-          <div class="row">
-            <select id="library-lang"></select>
-            <input id="library-q" type="search" placeholder="Search snippets…">
+          <div class="runbar">
+            <strong>Persistence</strong>
+            <input id="run-persist" type="range" min="0" max="10" step="1" value="0" class="gauge"
+                   title="how many times a failed step is tried again; at the top, until it succeeds or you Stop">
+            <span id="run-persist-label" class="muted"></span>
           </div>
-          <ul id="snippet-list" class="list plain"></ul>
+          <p class="hint">Runs use the workspace tools; risky ones ask you first. They see the plan, the step's
+            details and earlier results; nothing from the knowledge base. A retry starts from a clean context
+            holding only the step and what went wrong last time.</p>
+          <div id="run-log" class="log"></div>
         </div>
       </div>
     </div>
@@ -290,7 +252,7 @@
   <section id="view-relics" class="view">
     <div class="split">
       <aside class="side">
-        <p class="hint">Files your recipes and plans wrote. Forgetting one takes it off this list; the file stays.</p>
+        <p class="hint">Files your plans wrote. Forgetting one takes it off this list; the file stays.</p>
         <ul id="relic-list" class="list"></ul>
       </aside>
       <div class="pane">
@@ -356,7 +318,7 @@
     <div id="spane-tools" class="spane">
     <div class="card">
       <h3>Tools <span id="tool-count" class="muted"></span></h3>
-      <p class="hint">What plan runs may call; recipes use only risky_write_file. Risky tools ask you before each
+      <p class="hint">What plan runs may call. Risky tools ask you before each
         call. Add your own in <code>.smallharness/tools/</code> or <code>[tools].extra_dirs</code>.</p>
       <p id="tool-warnings" class="error" hidden></p>
       <table class="table"><thead><tr><th>Name</th><th>Runs</th><th>Description</th><th>Arguments</th></tr></thead>

@@ -1,18 +1,19 @@
 """What the web API shares between requests: the harness, whether the model is busy,
 Stop, permission questions waiting for the page, how events reach the page, and the
-run (plan or recipe) working in the background."""
+plan run working in the background."""
 from __future__ import annotations
 
 import threading
 import time
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Iterator
 
 from .. import __version__
 from ..agent import Events, Harness
 from ..errors import HarnessError
-from ..planning import Plan, plan_text
+from ..planning import PERSISTENCE_MAX, Plan, plan_text
 
 STATIC = Path(__file__).parent / "static"
 
@@ -39,14 +40,14 @@ class Stopped(KeyboardInterrupt):
 
 
 class Job:
-    """A plan run, expansion or recipe run, working in the background so it outlives the
+    """A plan run or expansion, working in the background so it outlives the
     request that started it. Its events are kept: a page that went away (reloaded, or a
     phone that put the browser to sleep) comes back and follows it from where it was."""
 
     def __init__(self, kind: str, target: str, label: str):
         self.id = uuid.uuid4().hex[:12]
         self.kind, self.target, self.label = kind, target, label
-        self.subject = None                   # the plan or recipe being worked on, live
+        self.subject = None                   # the plan being worked on, live
         self.events: list[dict] = []
         self.finished = False
         self._cond = threading.Condition()
@@ -192,7 +193,7 @@ class WebApp:
         return job
 
     def live(self, kind: str, target: str):
-        """The plan or recipe a running job is working on, or None: it shows steps
+        """The plan a running job is working on, or None: it shows steps
         as they run, which the saved copy does not."""
         job = self.job
         if job and not job.finished and job.kind in kind.split("|") and job.target == target:
@@ -224,8 +225,10 @@ class WebApp:
 
     def plan_dict(self, plan: Plan) -> dict:
         tasks = [{"num": t.num, "task": t.task, "tool": t.tool, "after": t.after, "status": t.status,
-                  "result": t.result, "detail": t.detail, "depth": t.depth} for t in plan.tasks]
+                  "result": t.result, "detail": t.detail, "depth": t.depth, "attempts": t.attempts,
+                  "checks": [asdict(c) for c in t.checks]} for t in plan.tasks]
         return {"id": plan.id, "goal": plan.goal, "mode": plan.mode, "tasks": tasks,
+                "persistence": plan.persistence, "persistence_max": PERSISTENCE_MAX,
                 "finished": plan.finished, "text": plan_text(plan)}
 
     def load_plan(self, plan_id: str) -> Plan:

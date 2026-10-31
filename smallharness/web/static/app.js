@@ -1,6 +1,6 @@
 "use strict";
-// SmallHarness web interface: Chat, Research, Notes, Planner, Recipes, Models, Settings, and
-// Relics (the files recipes and plans made) under the tabs. Plain DOM,
+// SmallHarness web interface: Chat, Research, Notes, Planner, Models, Settings, and
+// Relics (the files plans made) under the tabs. Plain DOM,
 // no libraries; every text is set with textContent, so model output and notes are
 // never interpreted as HTML.
 
@@ -109,7 +109,7 @@ function renderStatus(s) {
   const rows = [
     ["workspace", s.workspace], ["model", `${s.model.name} (${s.model.backend})`],
     ["loaded", s.model.loaded ? `yes · ${s.instances} instance(s)` : "no: loads when first used"],
-    ["instances fit", s.ram_managed ? `${s.capacity} (planner and recipes use up to this many)` : "1 (RAM not managed)"],
+    ["instances fit", s.ram_managed ? `${s.capacity} (the planner uses up to this many)` : "1 (RAM not managed)"],
     ["context", `${s.model.context_tokens} tokens${s.model.context_note ? " · " + s.model.context_note : ""}`],
     ["search", s.search], ["knowledge base", `${s.knowledge.sources} source(s), ${s.knowledge.chunks} chunks`],
     ["notes", String(s.notes)],
@@ -251,7 +251,7 @@ const chatLine = (thread) => (chat ? chat.messages.filter((m) => m.thread === th
 function who(m) {
   if (m.role === "user") return "you";
   if (m.role === "assistant") return { research: "research", plan: "plan", agent: "model + tools" }[m.kind] || "model";
-  return { info: "help", error: "error", note: "notes", recall: "recall", plan: "plan run", recipe: "recipe",
+  return { info: "help", error: "error", note: "notes", recall: "recall", plan: "plan run",
            research: "excerpts" }[m.kind] || "tool";
 }
 // A user message: its command lines in red, the question after them.
@@ -895,8 +895,33 @@ function renderPlan(p) {
         t.depth ? el("span", { class: "depth", text: `pass ${t.depth}`, title: "expansion passes so far" }) : null,
         el("span", { class: "status " + t.status, text: t.status })),
       t.detail ? el("div", { class: "detail", text: t.detail }) : null,
-      t.result ? el("div", { class: "result", text: "→ " + t.result }) : null)));
+      ...t.checks.map((c) => el("div", { class: "check-line " + c.status },
+        el("span", { class: "mark", text: { done: "✓", failed: "!" }[c.status] || "·" }),
+        el("span", { text: "check" }), el("span", { class: "tool-name", text: c.tool }), el("span", { text: c.task }),
+        c.result ? el("span", { class: "muted", text: "→ " + c.result }) : null)),
+      t.result ? el("div", { class: "result", text: "→ " + t.result + (t.attempts > 1 ? ` (attempt ${t.attempts})` : "") }) : null)));
+  showPersistence(p);
 }
+// The persistence gauge: retries per failed step; its top means until it succeeds or Stop.
+function persistenceLabel(n, max) {
+  if (n >= max) return "max: until it succeeds or you press Stop";
+  return n ? `${n} retr${n === 1 ? "y" : "ies"} per failed step` : "0: a failed step is not tried again";
+}
+function showPersistence(p) {
+  const g = $("run-persist");
+  g.max = p.persistence_max;
+  g.value = p.persistence;
+  $("run-persist-label").textContent = persistenceLabel(p.persistence, p.persistence_max);
+}
+$("run-persist").addEventListener("input", (e) => {
+  $("run-persist-label").textContent = persistenceLabel(Number(e.target.value), Number(e.target.max));
+});
+$("run-persist").addEventListener("change", async (e) => {
+  if (!plan) return;
+  try { plan = await api("PUT", `/api/plans/${plan.id}/persistence`, { persistence: Number(e.target.value) }); }
+  catch (err) { toast(err.message, true); }
+  showPersistence(plan);
+});
 async function markSteps(steps, done) {
   if (!plan) return;
   try { renderPlan(await api("PUT", `/api/plans/${plan.id}/steps`, { steps, done })); loadPlans(); }
@@ -936,21 +961,108 @@ $("plan-form").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message, true); }
   refreshState();
 });
-// Drafting or editing a plan: the steps as lines, their details indented below them.
-let planEditing = null;
+// Drafting or editing a plan: a row per step (its tool, what to do), its details and
+// checks below it; or, toggled, the same plan as text. Either way the server gets the
+// text form, so nothing behind the editor changes.
+let planEditing = null, planTools = ["none"], planAsText = false;
+const DETAIL_INDENT = "   ";
 async function openPlanEditor(p) {
   planEditing = p ? p.id : null;
   $("plan-editor-title").textContent = p ? `Edit plan ${p.id}` : "Draft a plan";
   $("plan-edit-goal").value = p ? p.goal : $("plan-goal").value.trim();
-  $("plan-edit-text").value = p ? p.text : "";
   $("plan-empty").hidden = true;
   $("plan-detail").hidden = true;
   $("plan-editor").hidden = false;
-  $("plan-edit-text").focus();
-  try {
-    const t = await api("GET", "/api/tools");
-    $("plan-edit-tools").textContent = "Tools: none, " + t.tools.map((x) => x.name).join(", ");
-  } catch (e) { /* the hint is optional */ }
+  try { planTools = ["none", ...(await api("GET", "/api/tools")).tools.map((x) => x.name)]; }
+  catch (e) { /* steps can still use none, or be edited as text */ }
+  const steps = p ? p.tasks.map((t) => ({ tool: t.tool, text: t.task + (t.after.length ? ` (after: ${t.after.join(", ")})` : ""),
+                                          detail: t.detail, checks: t.checks.map((c) => ({ tool: c.tool, text: c.task })) }))
+                  : [];
+  $("plan-edit-text").value = p ? p.text : "";
+  setPlanEditMode(false, steps.length ? steps : [blankStep()]);
+}
+const blankStep = () => ({ tool: "none", text: "", detail: "", checks: [] });
+function toolSelect(value) {
+  const sel = el("select", { class: "tool-pick", title: "the tool this step uses" },
+    ...[...new Set([...planTools, value])].map((t) => el("option", { value: t, text: t })));
+  sel.value = value;
+  return sel;
+}
+function checkRow(c) {
+  return el("div", { class: "check-row" },
+    el("span", { class: "muted", text: "check" }), toolSelect(c.tool),
+    el("input", { class: "what", value: c.text, placeholder: "what to verify, e.g. python hello.py prints hello" }),
+    el("button", { class: "small link", text: "✕", title: "remove this check", onclick: (e) => e.target.closest(".check-row").remove() }));
+}
+function stepRow(st) {
+  const row = el("div", { class: "step-row" });
+  const checks = el("div", { class: "checks" }, ...st.checks.map(checkRow));
+  const move = (dir) => {
+    const to = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
+    if (to) (dir < 0 ? to.before(row) : to.after(row));
+    numberSteps();
+  };
+  row.append(
+    el("div", { class: "step-main" },
+      el("strong", { class: "num" }), toolSelect(st.tool),
+      el("input", { class: "what", value: st.text, placeholder: "what to do (after: N)" }),
+      el("button", { class: "small link", text: "+ check", title: "add a check: if it fails, this step is done again",
+                     onclick: () => checks.append(checkRow({ tool: "none", text: "" })) }),
+      el("button", { class: "small link", text: "↑", title: "move up", onclick: () => move(-1) }),
+      el("button", { class: "small link", text: "↓", title: "move down", onclick: () => move(1) }),
+      el("button", { class: "small link", text: "✕", title: "remove this step", onclick: () => { row.remove(); numberSteps(); } })),
+    el("textarea", { class: "step-detail", rows: 2, spellcheck: "false", placeholder: "details (optional): how to do it" }),
+    checks);
+  row.querySelector(".step-detail").value = st.detail;
+  return row;
+}
+function numberSteps() {
+  [...$("plan-rows").children].forEach((r, i) => { r.querySelector(".num").textContent = `${i + 1}.`; });
+}
+function renderSteps(steps) {
+  $("plan-rows").replaceChildren(...steps.map(stepRow));
+  numberSteps();
+}
+function readSteps() {
+  return [...$("plan-rows").children].map((r) => ({
+    tool: r.querySelector(".step-main .tool-pick").value,
+    text: r.querySelector(".step-main .what").value.trim(),
+    detail: r.querySelector(".step-detail").value,
+    checks: [...r.querySelectorAll(".check-row")].map((c) => ({ tool: c.querySelector(".tool-pick").value,
+                                                                text: c.querySelector(".what").value.trim() }))
+                                                 .filter((c) => c.text),
+  })).filter((st) => st.text);
+}
+function stepsToText(steps) {
+  return steps.map((st, i) => [`${i + 1}. [${st.tool}] ${st.text.replace(/\s+/g, " ")}`,
+    ...st.detail.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => DETAIL_INDENT + l),
+    ...st.checks.map((c) => `${DETAIL_INDENT}check: [${c.tool}] ${c.text.replace(/\s+/g, " ")}`)].join("\n")).join("\n");
+}
+// The text form, read back into rows (the server reads it the same way when saving).
+function textToSteps(text) {
+  const steps = [];
+  for (const raw of text.split("\n")) {
+    if (!raw.trim()) continue;
+    const st = steps[steps.length - 1];
+    if (/^[ \t]/.test(raw) && st) {
+      const c = raw.trim().match(/^check\s*:\s*(?:\[([^\]]*)\])?\s*(.+)$/i);
+      if (c) st.checks.push({ tool: (c[1] || "none").trim() || "none", text: c[2].trim() });
+      else st.detail += (st.detail ? "\n" : "") + raw.trim();
+      continue;
+    }
+    const m = raw.match(/^\s*(?:[-*]\s*)?(?:\d+[.):]\s*)?(?:\[([^\]]*)\])?\s*(.*)$/);
+    steps.push({ tool: (m[1] || "none").trim() || "none", text: m[2].trim(), detail: "", checks: [] });
+  }
+  return steps;
+}
+function setPlanEditMode(asText, steps) {
+  planAsText = asText;
+  if (asText) $("plan-edit-text").value = stepsToText(steps || readSteps());
+  else renderSteps(steps || (textToSteps($("plan-edit-text").value).length ? textToSteps($("plan-edit-text").value) : [blankStep()]));
+  for (const id of ["plan-edit-text", "plan-text-hint"]) $(id).hidden = !asText;
+  for (const id of ["plan-rows", "plan-rows-bar"]) $(id).hidden = asText;
+  $("plan-edit-mode").textContent = asText ? "edit as steps" : "edit as text";
+  (asText ? $("plan-edit-text") : $("plan-rows").querySelector(".what"))?.focus();
 }
 function closePlanEditor() {
   $("plan-editor").hidden = true;
@@ -959,6 +1071,12 @@ function closePlanEditor() {
 $("plan-draft").addEventListener("click", () => openPlanEditor(null));
 $("plan-edit").addEventListener("click", () => { if (plan && !running) openPlanEditor(plan); });
 $("plan-edit-cancel").addEventListener("click", closePlanEditor);
+$("plan-edit-mode").addEventListener("click", () => setPlanEditMode(!planAsText));
+$("plan-add-step").addEventListener("click", () => {
+  $("plan-rows").append(stepRow(blankStep()));
+  numberSteps();
+  $("plan-rows").lastElementChild.querySelector(".what").focus();
+});
 $("plan-edit-text").addEventListener("keydown", (e) => {     // Tab indents: details are indented lines
   if (e.key !== "Tab") return;
   e.preventDefault();
@@ -966,7 +1084,8 @@ $("plan-edit-text").addEventListener("keydown", (e) => {     // Tab indents: det
   t.setRangeText("   ", at, t.selectionEnd, "end");
 });
 $("plan-edit-save").addEventListener("click", async () => {
-  const body = { goal: $("plan-edit-goal").value.trim(), text: $("plan-edit-text").value };
+  const text = planAsText ? $("plan-edit-text").value : stepsToText(readSteps());
+  const body = { goal: $("plan-edit-goal").value.trim(), text };
   if (!body.text.trim()) { toast("write at least one step", true); return; }
   try {
     const p = planEditing ? await api("PUT", `/api/plans/${planEditing}`, body) : await api("POST", "/api/plans", body);
@@ -980,7 +1099,7 @@ $("plan-edit-save").addEventListener("click", async () => {
 });
 
 // ================================================================== runs
-// Plan runs, expansions and recipe runs work on the server in the background. The page
+// Plan runs and expansions work on the server in the background. The page
 // follows a run by its events; if the connection drops (a reload, a phone that put the
 // browser to sleep) it joins again where it left off, and a page opened later (or on
 // another device) joins from the start. RUNS[kind] has what each kind adds.
@@ -988,10 +1107,10 @@ let live = null;                       // the run this page follows: {id, kind, 
 const RUNS = {};
 function setRunning(on) {
   running = on;
-  for (const id of ["run-btn", "expand-btn", "recipe-run", "chat-send", "thread-send"]) $(id).disabled = on;
+  for (const id of ["run-btn", "expand-btn", "chat-send", "thread-send"]) $(id).disabled = on;
 }
-const runLog = (kind) => $(kind === "recipe" ? "recipe-log" : "run-log");
-// A log belongs to the plan or recipe its run worked on: hidden while another one is
+const runLog = () => $("run-log");
+// A log belongs to the plan its run worked on: hidden while another one is
 // open during the run, and cleared when another one is opened after it.
 function ownLog(log, shown) {
   const owner = log.dataset.owner;
@@ -1009,8 +1128,8 @@ async function joinRun(job, reveal) {
   if (running) return;
   if (job.kind === "chat") return joinChat(job, reveal);
   setRunning(true);                    // claimed, so the next state check does not join twice
-  if (reveal) show(job.kind === "recipe" ? "recipes" : "planner");
-  if (job.kind === "recipe") await openRecipe(job.target); else await openPlan(job.target);
+  if (reveal) show("planner");
+  await openPlan(job.target);
   setRunning(false);
   followRun(job.kind, job.target, (cb) => stream(`/api/jobs/${job.id}/events?since=0`, undefined, cb));
 }
@@ -1090,7 +1209,7 @@ function stepNumbers(text) {
 $("expand-btn").addEventListener("click", async () => {
   if (!plan) return;
   const body = { steps: stepNumbers($("expand-steps").value), times: Number($("expand-times").value) || 1,
-                 parallel: $("expand-parallel").checked };
+                 parallel: $("expand-parallel").checked, checks: $("expand-checks").checked };
   await startRun("expand", plan.id, `/api/plans/${plan.id}/expand`, body);
 });
 // A plan shown is redrawn from the run's events only if it is the plan the run is on.
@@ -1103,7 +1222,7 @@ RUNS.expand = { busy: "expanding the plan", after: afterPlanRun,
   } };
 $("run-btn").addEventListener("click", async () => {
   if (!plan) return;
-  const body = { mode: $("run-mode").value, parallel: $("run-parallel").checked };
+  const body = { mode: $("run-mode").value, parallel: $("run-parallel").checked, persistence: Number($("run-persist").value) };
   await startRun("run", plan.id, `/api/plans/${plan.id}/run`, body);
 });
 RUNS.run = { busy: "running the plan", after: afterPlanRun,
@@ -1118,164 +1237,8 @@ RUNS.run = { busy: "running the plan", after: afterPlanRun,
     }
   } };
 
-// ================================================================ recipes
-let recipe = null;
-async function loadRecipes() {
-  try {
-    const data = await api("GET", "/api/recipes");
-    $("recipe-list").replaceChildren(...data.recipes.map((r) =>
-      el("li", { class: "item" + (recipe && r.name === recipe.name ? " active" : ""), onclick: () => openRecipe(r.name) },
-        el("div", { class: "grow" },
-          el("span", { text: r.name }),
-          el("span", { class: "sub", text: r.error ? r.error : `→ ${r.target} · ${r.mode} · ${r.done}/${r.sections} written` })),
-        el("button", { class: "small link", text: "✕", title: "delete this recipe",
-                       onclick: (e) => { e.stopPropagation(); deleteRecipe(r.name); } }))));
-    if (!data.recipes.length) $("recipe-list").append(el("li", { class: "muted", text: "no recipes yet" }));
-  } catch (e) { toast(e.message, true); }
-}
-loaders.recipes = () => { loadRecipes(); loadLibrary(recipe && recipe.library); };
-async function openRecipe(name) {
-  try {
-    showRecipe(await api("GET", `/api/recipes/${name}`));
-    ownLog($("recipe-log"), name);
-    loadRecipes();
-  } catch (e) { toast(e.message, true); }
-}
-// The editor shows the sections; target and mode have their own fields.
-function showRecipe(r) {
-  recipe = r;
-  $("recipe-name").value = r ? r.name : "";
-  $("recipe-name").readOnly = !!r;
-  $("recipe-target").value = r ? r.target : "";
-  $("recipe-mode").value = r ? r.mode : "";
-  $("recipe-text").value = r ? r.text.replace(/^(\s*(target|mode)\s*:.*\n)+\n*/i, "") : "";
-  $("recipe-delete").hidden = !r;
-  $("recipe-status").textContent = "";
-  renderSections(r);
-}
-function renderSections(r) {
-  $("recipe-tick-row").hidden = !(r && r.sections.length);
-  $("recipe-sections").replaceChildren(...(r ? r.sections : []).map((s) => {
-    const [first, ...rest] = s.text.split("\n");
-    const done = s.state === "done";
-    return el("li", {},
-      el("div", { class: "head" },
-        el("input", { type: "checkbox", class: "tick", checked: done,
-                      disabled: running || s.state === "running" || (!done && !s.code),
-                      title: done ? "untick: the next Write writes this section again"
-                                  : s.code ? "tick: keep the code it has" : "not written yet",
-                      onchange: (e) => markSections([s.num], e.target.checked) }),
-        el("strong", { text: `${s.num}.` }), el("span", { text: first }),
-        rest.length ? el("span", { class: "muted", text: `+${rest.length} line(s)` }) : null,
-        el("span", { class: "grow" }), el("span", { class: "status " + (s.state === "changed" ? "skipped" : s.state), text: s.state })),
-      s.note ? el("div", { class: "result", text: "→ " + s.note }) : null,
-      s.code ? el("details", { class: "tool" }, el("summary", { text: `${r.mode === "text" ? "text" : "code"} · ${s.code.split("\n").length} line(s)`
-          + (s.snippet ? ` · ${s.reused ? "reused " : "library "}${s.snippet}` : "") }),
-        el("pre", { text: s.code })) : null);
-  }));
-  if (r && r.library) loadLibrary(r.library);
-}
-
-// the code library: one per language, searched before a section is written
-let libraryTimer;
-async function loadLibrary(lang) {
-  try {
-    const data = await api("GET", "/api/snippets");
-    const keys = data.languages.map((l) => l.key);
-    if (lang && !keys.includes(lang)) keys.push(lang);
-    const sel = $("library-lang");
-    const current = lang || sel.value || keys[0] || "";
-    sel.replaceChildren(...keys.map((k) => el("option", { value: k, text: k })));
-    sel.value = current;
-    if (!current) { $("snippet-list").replaceChildren(el("li", { class: "muted", text: "empty: recipes in code mode fill it" })); return; }
-    const q = $("library-q").value.trim();
-    const res = await api("GET", `/api/snippets/${current}` + (q ? "?" + new URLSearchParams({ q }) : ""));
-    $("snippet-list").replaceChildren(...res.snippets.map((s) => {
-      const code = el("pre", { class: "out", hidden: true });
-      return el("li", {},
-        el("div", { class: "grow" },
-          el("a", { href: "#", text: s.id, onclick: async (e) => {
-            e.preventDefault();
-            if (code.hidden && !code.textContent) code.textContent = (await api("GET", `/api/snippets/${current}/${s.id}`)).code;
-            code.hidden = !code.hidden;
-          } }),
-          el("span", { class: "sub", text: `${s.description} · used by ${s.recipes.join(", ")}` }), code),
-        el("button", { class: "small link", text: "✕", title: "take out of the library; recipes that used it write that section again",
-                       onclick: async () => {
-                         if (!confirm(`Remove ${s.id} from the ${current} library?`)) return;
-                         try { await api("DELETE", `/api/snippets/${current}/${s.id}`); loadLibrary(current); } catch (err) { toast(err.message, true); }
-                       } }));
-    }));
-    if (!res.snippets.length) $("snippet-list").append(el("li", { class: "muted", text: q ? "nothing matches" : "empty" }));
-  } catch (e) { toast(e.message, true); }
-}
-$("library-lang").addEventListener("change", () => loadLibrary($("library-lang").value));
-$("library-q").addEventListener("input", () => { clearTimeout(libraryTimer); libraryTimer = setTimeout(() => loadLibrary($("library-lang").value), 250); });
-async function saveRecipe() {
-  const name = $("recipe-name").value.trim();
-  if (!/^[A-Za-z0-9][\w-]{0,63}$/.test(name)) throw new Error("give the recipe a name: letters, digits, - and _");
-  const r = await api("PUT", `/api/recipes/${name}`, { text: $("recipe-text").value, target: $("recipe-target").value.trim(),
-                                                      mode: $("recipe-mode").value });
-  showRecipe(r);
-  loadRecipes();
-  return r;
-}
-$("recipe-new").addEventListener("click", () => { showRecipe(null); $("recipe-log").replaceChildren(); $("recipe-name").focus(); loadRecipes(); });
-$("recipe-save").addEventListener("click", async () => {
-  try { await saveRecipe(); $("recipe-status").textContent = "saved"; } catch (e) { toast(e.message, true); }
-});
-async function deleteRecipe(name) {
-  if (running) { toast("wait for the run to end", true); return; }
-  if (!confirm(`Delete the recipe ${name}? The file it wrote stays.`)) return;
-  try {
-    await api("DELETE", `/api/recipes/${name}`);
-    if (recipe && recipe.name === name) { showRecipe(null); $("recipe-log").replaceChildren(); }
-    toast("recipe deleted");
-    loadRecipes();
-  } catch (e) { toast(e.message, true); }
-}
-$("recipe-delete").addEventListener("click", () => { if (recipe) deleteRecipe(recipe.name); });
-// Ticks change only which sections the next Write writes; the editor's unsaved text stays.
-async function markSections(sections, done) {
-  if (!recipe) return;
-  try { recipe = await api("PUT", `/api/recipes/${recipe.name}/sections`, { sections, done }); loadRecipes(); }
-  catch (e) { toast(e.message, true); }
-  renderSections(recipe);
-}
-$("recipe-untick").addEventListener("click", () => {
-  if (recipe && confirm("Untick every section? The next Write writes them all again.")) markSections(null, false);
-});
-$("recipe-run").addEventListener("click", async () => {
-  if (running) return;
-  let r;
-  try { r = await saveRecipe(); } catch (e) { toast(e.message, true); return; }
-  await startRun("recipe", r.name, `/api/recipes/${r.name}/run`,
-                 { all: $("recipe-all").checked, parallel: $("recipe-parallel").checked });
-});
-RUNS.recipe = { busy: "writing a recipe",
-  after: async () => {             // the sections only: unsaved text in the editor stays
-    loadRecipes();
-    if (!recipe) return;
-    try { recipe = await api("GET", `/api/recipes/${recipe.name}`); } catch (e) { return; }
-    renderSections(recipe);
-  },
-  onEvent: (ev, log) => {
-    if (ev.type === "section_start") logLine(`▶ section ${ev.num}: ${ev.text.split("\n")[0]}`, "ev-task", log);
-    else if (ev.type === "section_end") {
-      logLine(ev.status === "done" ? `  ✓ section ${ev.num}: ${ev.code.split("\n").length} line(s)` : `  section ${ev.num} FAILED: ${ev.note}`,
-              ev.status === "done" ? "ev-ok" : "ev-bad", log);
-    } else if (ev.type === "done") {
-      const why = { denied: "not allowed: nothing was written", "nothing to write":
-        "every section is written already; tick “all sections” to write them again" }[ev.reason];
-      logLine("■ " + (why || `${ev.reason}: wrote ${ev.written.length}, failed ${ev.failed.length} → ${ev.recipe.target}`),
-              ev.reason === "denied" || ev.failed.length ? "ev-bad" : "ev-task", log);
-      if (recipe && recipe.name === ev.recipe.name) showRecipe(ev.recipe);
-      renderState(ev.state);
-    }
-  } };
-
 // ================================================================= relics
-// The files recipes and plans wrote: listed under the tabs, opened and edited here.
+// The files plans wrote: listed under the tabs, opened and edited here.
 const RELICS_IN_NAV = 12;
 let relics = [], relicPath = null, relicDirty = false;
 const relicBy = (by) => by.map((b) => b.replace(":", " ")).join(", ");
@@ -1297,7 +1260,7 @@ function renderRelics() {
         el("span", { class: "sub", text: `${relicBy(r.by)} · ` + (r.exists ? `${when(r.updated)} · ${r.size} bytes` : "file gone") })),
       el("button", { class: "small link", text: "✕", title: "forget: take it off the list; the file stays",
                      onclick: (e) => { e.stopPropagation(); forgetRelic(r.path); } }))));
-  if (!relics.length) $("relic-list").append(el("li", { class: "muted", text: "nothing yet: run a recipe, or a plan that writes files" }));
+  if (!relics.length) $("relic-list").append(el("li", { class: "muted", text: "nothing yet: run a plan that writes files" }));
 }
 async function openRelic(path, force = false) {
   if (!force && relicDirty && path !== relicPath && !confirm("Discard unsaved changes?")) return;
@@ -1310,10 +1273,7 @@ async function openRelic(path, force = false) {
   $("relic-detail").hidden = false;
   $("relic-title").textContent = path;
   $("relic-meta").textContent = r ? relicBy(r.by) : "";
-  const recipes = r ? r.by.filter((b) => b.startsWith("recipe:")).map((b) => b.slice(7)) : [];
-  $("relic-note").textContent = recipes.length
-    ? `Written by the recipe ${recipes.join(", ")}: its next Write rebuilds the whole file, replacing edits made here.`
-    : "Edits are written to the file when you save. Ctrl+S saves.";
+  $("relic-note").textContent = "Edits are written to the file when you save. Ctrl+S saves.";
   $("relic-status").textContent = "";
   try {
     $("relic-text").value = (await api("GET", "/api/relics/file?" + new URLSearchParams({ path }))).text;
@@ -1480,6 +1440,6 @@ $("config-save").addEventListener("click", async () => {
 // ================================================================== start
 refreshState();
 loadRelics();
-show(["chat", "research", "notes", "planner", "recipes", "relics", "models", "settings"].includes(recall("sh-view", "")) ? recall("sh-view", "") : "chat");
+show(["chat", "research", "notes", "planner", "relics", "models", "settings"].includes(recall("sh-view", "")) ? recall("sh-view", "") : "chat");
 showPane(recall("sh-pane", "") === "bibliography" ? "bibliography" : "ask");
 setInterval(() => { if (!document.hidden && !running) refreshState(); }, 5000);

@@ -9,8 +9,6 @@ go into detail.
 - [Research](research.md): the knowledge base, asking, references, attaching, notes,
   and how searching works.
 - [Planner](planner.md): creating, expanding, editing and running plans.
-- [Recipes](recipes.md): turning a recipe into a file section by section, and the code
-  library.
 - [Web interface](web.md): every tab, Relics, and how the local server is protected.
 - [Commands](commands.md): the terminal modes, their commands, and one-off shell use.
 

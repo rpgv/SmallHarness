@@ -61,7 +61,12 @@ EXPAND = """EXPAND STEP {num} of the plan for: {goal}
 STEP: {step}
 {current}
 Write the details of this step in at most {lines} lines: what to read or change, with which
-tool and arguments, and how to tell it is done. Keep what is already right; add depth."""
+tool and arguments, and how to tell it is done. Keep what is already right; add depth.{checks}"""
+
+EXPAND_CHECKS = """
+After the details, add up to {n} checks that prove the step worked, each on its own line:
+CHECK: [tool] what to verify
+Tools: {tools}"""
 
 RUN_SYSTEM = "You carry out one task of a plan in a code workspace, using the tools when needed."
 
@@ -70,42 +75,25 @@ TASK = """PLAN:
 
 {deps}CURRENT TASK {num}: {task}
 {tool_hint}
-{details}Do only this task. To use a tool, reply with only the call and wait for its result; do not write DONE in the same reply.
+{details}{checks}{previous}Do only this task. To use a tool, reply with only the call and wait for its result; do not write DONE in the same reply.
 A search that finds nothing is still a result: reply DONE and say what was not found.
 Finish with one line: DONE: <result>  or  FAILED: <reason>"""
 
-# ------------------------------------------------------------------ recipe
-RECIPE_SYSTEM = {
-    "code": "You turn one section of a recipe into {language} code. Write only code.",
-    "text": "You turn one section of a recipe into Markdown prose. Write only the text.",
-}
+TASK_CHECKS = "AFTERWARDS IT WILL BE CHECKED THAT:\n{checks}\n"
 
-LIBRARY = """LIBRARY (code already written). If one does exactly what this section asks, reply with
-only: REUSE <id>
-
-{snippets}
-
+TASK_PREVIOUS = """AN EARLIER ATTEMPT AT THIS TASK FAILED:
+{feedback}
+Start again from the workspace as it is now, and avoid what went wrong.
 """
 
-RECIPE = {
-    "code": """RECIPE SECTION {num} of {total} for {target}. Other sections are written separately.
+CHECK = """CHECK FOR TASK {num} of the plan for: {goal}
+The task was: {task}
+It reported: {result}
 
-SECTION {num}:
-{section}
-
-{library}Write the code it describes, with the imports it needs; no usage examples or tests.
-Reply with only:
-<tool>{{"name": "risky_write_file", "args": {{"path": "{target}", "content": "..."}}}}</tool>""",
-    "text": """RECIPE SECTION {num} of {total} for {target}. Other sections are written separately.
-
-SECTION {num}:
-{section}
-
-Write the paragraphs it describes, in Markdown; no title for the whole document.
-Reply with only:
-<tool>{{"name": "risky_write_file", "args": {{"path": "{target}", "content": "..."}}}}</tool>""",
-}
-
+CHECK: {check}
+{tool_hint}
+Only verify; do not fix anything. To use a tool, reply with only the call and wait for its result.
+Finish with one line: DONE: <what shows it holds>  or  FAILED: <what is wrong>"""
 
 def render(template: str, system: str, turns: list[tuple[str, str]]) -> str:
     """Render to one prompt string. `turns` roles: user | assistant | tool.

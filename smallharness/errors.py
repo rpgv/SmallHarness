@@ -8,7 +8,7 @@ class HarnessError(Exception):
 
 
 class Invalid(HarnessError, ValueError):
-    """The input cannot be used: a bad name, an empty plan, a recipe without a target."""
+    """The input cannot be used: a bad name, an empty plan."""
     status = 422
 
 

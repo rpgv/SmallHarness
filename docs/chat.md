@@ -33,7 +33,6 @@ can see them in later messages.
 | `/find WORDS` | the knowledge-base excerpts for some words, without the model |
 | `/note TEXT`, `/notes [WORDS]` | save a note; find notes |
 | `/plan GOAL`, `/runplan [ID]` | draft a [plan](planner.md); run it (the last one drafted here by default) |
-| `/recipe NAME` | write a saved [recipe](recipes.md) into its file (asks first) |
 | `/recall WORDS` | search this chat's turns that were folded into the summary |
 | `/tools`, `/help` | list the tools, or the commands (shown, never sent to the model) |
 

@@ -1,5 +1,5 @@
-"""Relics: the files recipes and plans made. Each is kept by its path in the workspace,
-with what wrote it (`recipe:NAME`, `plan:ID`) and when, so they can be found and
+"""Relics: the files plans made. Each is kept by its path in the workspace,
+with what wrote it (`plan:ID`) and when, so they can be found and
 edited again from the web interface. The list lives in `.smallharness/relics.json`;
 forgetting a relic leaves its file alone."""
 from __future__ import annotations

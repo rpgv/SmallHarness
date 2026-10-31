@@ -1,4 +1,4 @@
-"""The visual interface's server (chat, research, notes, planner, recipes, relics), against the mock model."""
+"""The visual interface's server (chat, research, notes, planner, relics), against the mock model."""
 import io
 import json
 import tempfile
@@ -65,7 +65,7 @@ class Web(unittest.TestCase):
         status, page = self.req("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("SmallHarness", page)
-        for tab in ("Chat", "Research", "Planner", "Recipes"):
+        for tab in ("Chat", "Research", "Planner"):
             self.assertIn(f">{tab}</button>", page)
         self.assertEqual(self.req("GET", "/app.js")[0], 200)
         self.assertIn("[hidden] { display: none !important; }", self.req("GET", "/app.css")[1])
@@ -152,6 +152,24 @@ class Web(unittest.TestCase):
         self.assertEqual((status, edited["goal"], len(edited["tasks"])), (200, "by hand", 3))
         self.assertEqual(self.req("PUT", "/api/plans/nope", {"text": "1. x"})[0], 404)
 
+    def test_persistence_and_checks(self):
+        text = "1. [none] Write it\n   check: [none] it has text\n2. [none] Report (after: 1)"
+        _, plan = self.req("POST", "/api/plans", {"goal": "g", "text": text})
+        self.assertEqual((plan["persistence"], plan["persistence_max"]), (2, 10))   # [plan].persistence
+        self.assertEqual(plan["tasks"][0]["checks"], [{"task": "it has text", "tool": "none", "status": "pending", "result": ""}])
+        self.assertEqual(plan["text"], text)
+        _, plan = self.req("PUT", f"/api/plans/{plan['id']}/persistence", {"persistence": 3})
+        self.assertEqual(plan["persistence"], 3)
+        self.assertEqual(self.req("PUT", f"/api/plans/{plan['id']}/persistence", {"persistence": "lots"})[0], 422)
+        self.backend.script.extend(["DONE: wrote it", "FAILED: it is empty", "DONE: wrote it again", "DONE: it has text",
+                                    "DONE: reported"])
+        _, events = self.req("POST", f"/api/plans/{plan['id']}/run", {"mode": "fresh"})
+        t1 = events[-1]["plan"]["tasks"][0]
+        self.assertEqual((t1["status"], t1["attempts"], t1["checks"][0]["status"]), ("done", 2, "done"))
+        self.assertTrue(any(e["type"] == "notice" and "attempt 2 of 4" in e["text"] for e in events))
+        _, events = self.req("POST", f"/api/plans/{plan['id']}/expand", {"steps": [2], "checks": True})
+        self.assertEqual(len(events[-1]["plan"]["tasks"][1]["checks"]), 1)
+
     def test_risky_tool_asks_the_page(self):
         _, plan = self.req("POST", "/api/plans", {"goal": "write", "text": "[risky_write_file] Write x.txt"})
         self.backend.script.extend(['<tool>{"name": "risky_write_file", "args": {"path": "x.txt", "content": "hi"}}</tool>',
@@ -161,11 +179,20 @@ class Web(unittest.TestCase):
             events=self.req("POST", f"/api/plans/{plan['id']}/run", {"mode": "fresh"})[1]))
         t.start()
         pid = self.wait_for_permit()
+        self.assertFalse((self.ws / "x.txt").exists())                                    # asked before writing
         self.assertEqual(self.req("POST", "/api/research/ask", {"question": "x"})[0], 409)   # one at a time
+        job = self.req("GET", "/api/state")[1]["job"]
+        with urllib.request.urlopen(self.base + f"/api/jobs/{job['id']}/events", timeout=20) as res:
+            asked = next(json.loads(line) for line in res if b'"permit"' in line)
+        self.assertEqual(asked["id"], pid)                                                # a page joining is asked too
         self.req("POST", "/api/permit", {"id": pid, "allow": True})
         t.join(20)
+        self.assertEqual(sum(e["type"] == "permit" for e in out["events"]), 1)            # once
         self.assertEqual(next(e for e in out["events"] if e["type"] == "permit")["tool"], "risky_write_file")
+        _, replay = self.req("GET", f"/api/jobs/{job['id']}/events")
+        self.assertEqual([e["type"] for e in replay if "permit" in e["type"]], ["permit_end"])  # answered: not asked again
         self.assertEqual((self.ws / "x.txt").read_text().strip(), "hi")
+        self.assertEqual([x["path"] for x in self.req("GET", "/api/relics")[1]["relics"]], ["x.txt"])
 
     def test_stop_ends_a_plan_run(self):
         _, plan = self.req("POST", "/api/plans", {"goal": "g", "text": "[none] First\n[none] Second"})
@@ -283,73 +310,6 @@ class Web(unittest.TestCase):
         self.assertIn("agent", [x["name"] for x in listing["commands"]])
         self.assertEqual(self.req("DELETE", f"/api/chats/{cid}")[0], 200)
         self.assertEqual(self.req("GET", f"/api/chats/{cid}")[0], 404)
-
-    # ------------------------------------------------------------- recipes
-    def test_recipes(self):
-        status, r = self.req("PUT", "/api/recipes/calc", {"text": "add(a, b) -> int\n\nsub(a, b) -> int", "target": "calc.py"})
-        self.assertEqual(status, 200, r)
-        self.assertEqual((r["target"], r["mode"], len(r["sections"])), ("calc.py", "code", 2))
-        self.assertEqual(self.req("PUT", "/api/recipes/bad", {"text": "x"})[0], 422)            # no target
-        self.assertEqual(self.req("GET", "/api/recipes/missing")[0], 404)
-        out = {}
-        t = threading.Thread(target=lambda: out.update(events=self.req("POST", "/api/recipes/calc/run", {})[1]))
-        t.start()
-        pid = self.wait_for_permit()
-        self.assertFalse((self.ws / "calc.py").exists())                                  # asked before writing
-        job = self.req("GET", "/api/state")[1]["job"]
-        with urllib.request.urlopen(self.base + f"/api/jobs/{job['id']}/events", timeout=20) as res:
-            asked = next(json.loads(line) for line in res if b'"permit"' in line)
-        self.assertEqual(asked["id"], pid)                                                # a page joining is asked too
-        self.req("POST", "/api/permit", {"id": pid, "allow": True})
-        t.join(20)
-        events = out["events"]
-        self.assertEqual(sum(e["type"] == "permit" for e in events), 1)                   # once
-        _, replay = self.req("GET", f"/api/jobs/{job['id']}/events")
-        self.assertEqual([e["type"] for e in replay if "permit" in e["type"]], ["permit_end"])  # answered: not asked again
-        self.assertEqual(events[-1]["written"], [1, 2])
-        self.assertIn("def add", (self.ws / "calc.py").read_text())
-        _, r = self.req("PUT", "/api/recipes/intro", {"text": "Purpose\n\nAudience", "target": "intro.md"})
-        self.assertEqual(r["mode"], "text")
-        _, r = self.req("PUT", "/api/recipes/intro", {"text": "Purpose\n\nAudience", "target": "intro.md", "mode": "code"})
-        self.assertEqual(r["mode"], "code")                                                # the toggle
-        self.assertEqual([x["path"] for x in self.req("GET", "/api/relics")[1]["relics"]], ["calc.py"])
-        _, r = self.req("PUT", "/api/recipes/calc/sections", {"sections": [2], "done": False})   # untick: write again
-        self.assertEqual([s["state"] for s in r["sections"]], ["done", "pending"])
-        _, r = self.req("PUT", "/api/recipes/calc/sections", {"sections": [2], "done": True})    # and tick back
-        self.assertEqual([s["state"] for s in r["sections"]], ["done", "done"])
-        _, r = self.req("PUT", "/api/recipes/calc/sections", {"done": False})                    # every section
-        self.assertEqual([s["state"] for s in r["sections"]], ["pending", "pending"])
-        self.assertEqual(self.req("PUT", "/api/recipes/calc/sections", {"sections": [7]})[0], 404)
-        self.assertEqual(self.req("PUT", "/api/recipes/intro/sections", {"sections": [1], "done": True})[0], 422)  # never written
-        self.assertEqual(self.req("DELETE", "/api/recipes/calc")[0], 200)
-        self.assertTrue((self.ws / "calc.py").exists())                                   # the code stays
-
-    def test_code_library(self):
-        self.req("PUT", "/api/recipes/calc", {"text": "add(a, b) -> int\n\nsub(a, b) -> int", "target": "calc.py"})
-        self.h.cfg.data["recipe"]["library"] = True
-        from smallharness.recipe import RecipeRunner, load_saved
-        RecipeRunner(self.h, load_saved(self.h.cfg, "calc")).run(permit=lambda: True)
-        _, r = self.req("GET", "/api/recipes/calc")
-        self.assertEqual(r["library"], "python")
-        self.assertTrue(all(s["snippet"] for s in r["sections"]))
-        self.assertIn("def add", r["sections"][0]["code"])                  # read from the snippet file
-        _, langs = self.req("GET", "/api/snippets")
-        self.assertEqual(langs["languages"], [{"key": "python", "snippets": 2}])
-        _, found = self.req("GET", "/api/snippets/python?q=add")
-        sid = found["snippets"][0]["id"]
-        self.assertTrue(sid.startswith("add-"))
-        self.assertIn("def add", self.req("GET", f"/api/snippets/python/{sid}")[1]["code"])
-        self.assertEqual(self.req("DELETE", f"/api/snippets/python/{sid}")[0], 200)
-        self.assertEqual(self.req("GET", f"/api/snippets/python/{sid}")[0], 404)
-        self.assertEqual(self.req("GET", "/api/snippets/klingon")[0], 404)
-        self.req("PUT", "/api/recipes/calc/sections", {"sections": [2], "done": False})
-        calls = len(self.backend.prompts)
-        RecipeRunner(self.h, load_saved(self.h.cfg, "calc")).run(permit=lambda: True)
-        self.assertGreater(len(self.backend.prompts), calls)      # unticked: written anew, not reused
-        again = load_saved(self.h.cfg, "calc").sections[1]
-        self.assertEqual((again.status, again.redo, again.reused), ("done", False, False))
-        _, r = self.req("PUT", "/api/recipes/intro", {"text": "Purpose", "target": "intro.md"})
-        self.assertIsNone(r["library"])                                        # text mode: no library
 
     # ----------------------------------------------------- models, settings
     def test_models_settings_errors(self):

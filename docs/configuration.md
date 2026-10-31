@@ -51,8 +51,6 @@ Everything the harness keeps for a workspace is in `<project>/.smallharness/`:
 | `research/` | each research session's bibliography (temporary) |
 | `library/` | files uploaded from the web interface |
 | `plans/` | saved plans |
-| `recipes/` | saved recipes, and each one's written sections |
-| `snippets/` | the code library, one folder per language |
-| `relics.json` | the files recipes and plans wrote |
+| `relics.json` | the files plans wrote |
 | `tools/` | the workspace's own tools (loaded only if trusted) |
 | `sessions/`, `history` | terminal sessions and input history |

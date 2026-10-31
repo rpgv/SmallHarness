@@ -1,7 +1,6 @@
 # Tools
 
-Plan runs are the only place the model calls tools; recipes use `risky_write_file`
-alone. Code: `tools/`.
+Plan runs are the only place the model calls tools. Code: `tools/`.
 
 | tool | type |
 |---|---|

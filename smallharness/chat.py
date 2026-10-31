@@ -52,7 +52,6 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "notes": ("/notes [WORDS]", "find notes, or list the latest ones"),
     "plan": ("/plan GOAL", "draft a plan for GOAL"),
     "runplan": ("/runplan [ID]", "run a plan (default: the last one drafted here); risky steps ask"),
-    "recipe": ("/recipe NAME", "write a saved recipe into its file; asks first"),
     "recall": ("/recall WORDS", "search this chat's turns that were folded into the summary"),
     "help": ("/help", "these commands"),
 }
@@ -70,7 +69,7 @@ class Message:
     text: str                       # what the chat shows
     seen: str = ""                  # what the model sees of it; "" leaves it out (help, errors)
     thread: int = 0                 # the message whose thread it is in; 0 = the conversation
-    kind: str = "chat"              # chat | tool | research | plan | recipe | note | recall | agent | info | error
+    kind: str = "chat"              # chat | tool | research | plan | note | recall | agent | info | error
     pinned: bool = False
     meta: dict = field(default_factory=dict)
     ts: float = field(default_factory=time.time)
@@ -422,8 +421,6 @@ class Chat:
                         plan=plan.id, warnings=warnings)]
         if name == "runplan":
             return [self._run_plan(arg, add, events)]
-        if name == "recipe":
-            return [self._recipe(need("a saved recipe's name"), add, events)]
         if name == "recall":
             hits = search([self.archive], need("what to look for"), 3)
             text = "\n\n".join(f"[{c.source.rsplit('#', 1)[-1]}]\n{c.text.strip()}" for c in hits) \
@@ -482,16 +479,6 @@ class Chat:
         text = plan.render(results=True)
         return add("tool", text, seen=f"(ran plan {plan.id})\n{text}", kind="plan", plan=plan.id,
                    finished=plan.finished)
-
-    def _recipe(self, name: str, add, events: Events | None) -> Message:
-        from .recipe import RecipeRunner, load_saved
-        recipe = load_saved(self.h.cfg, name)
-        ev = events or self.h.events
-        res = RecipeRunner(self.h, recipe, ev).run(
-            on_end=lambda s: ev.on_notice(f"section {s.num} {s.status}" + (f": {s.note}" if s.note else "")))
-        text = (f"recipe {name} → {recipe.target}: {res.reason}; wrote {res.written or 'none'}"
-                + (f", failed {res.failed}" if res.failed else ""))
-        return add("tool", text, kind="recipe", recipe=name, target=recipe.target)
 
 
 class ChatStore:

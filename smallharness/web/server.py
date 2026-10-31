@@ -7,8 +7,8 @@ Origin must come from this server's own page; and every request with a body must
 is JSON (or, for an upload, binary), which a page on another site can only send after a
 CORS preflight that this server never approves. So other sites cannot drive the API.
 
-Model work (research answers, plans, recipes, loading, switching, pulls) runs one
-request at a time; a second one gets 409. Plan runs, expansions and recipe runs work in
+Model work (research answers, plans, loading, switching, pulls) runs one
+request at a time; a second one gets 409. Plan runs and expansions work in
 the background: their reply follows the run, and if the page goes away the run goes on,
 and any page can follow it again (GET /api/jobs/ID/events?since=N). The knowledge base,
 notes and settings work at any time, before a model is loaded.

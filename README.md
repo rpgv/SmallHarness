@@ -3,7 +3,7 @@
 A rigid harness for small local models, built for Google's
 [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM), with
 [Ollama](https://ollama.com) as a second engine. Small models do best with a narrow
-job and a clean context, so every mode keeps the model's context small. There are four
+job and a clean context, so every mode keeps the model's context small. There are three
 modes:
 
 - **Chat**: talk with the model. It gets no tools unless a message asks for one with a
@@ -14,8 +14,6 @@ modes:
   rest on, like `[3]`.
 - **Planner**: turn one sentence into a step-by-step plan, refine it, and run it with
   tools.
-- **Recipe**: describe a file section by section, and the model writes it: code, or
-  Markdown.
 
 Each model call holds only what the mode puts in: a research question its excerpts, a
 chat reply its conversation (or just its thread). The harness keeps the context in budget, finds the right excerpts, checks tool calls (risky
@@ -93,19 +91,8 @@ smallharness ask "when does the release train leave?"
 smallharness plan "add a --verbose flag" --expand 2 --run fresh
 ```
 
-**Recipe.** Save a recipe in recipe mode (`/new shapes`), describing each section:
-
-```
-target: src/shapes.py
-
-area(radius: float) -> float
-returns the area of a circle, using math.pi
-```
-
-Then write it with `smallharness recipe shapes`.
-
 **Web interface.** `smallharness web` opens all of this in your browser (chat with
-threads beside the conversation), plus a Notes tab, model downloads, settings, and **Relics**: the files your recipes and plans
+threads beside the conversation), plus a Notes tab, model downloads, settings, and **Relics**: the files your plans
 wrote, ready to edit.
 
 Your settings go in `smallharness.toml`, and what the harness keeps for a project goes
@@ -115,7 +102,7 @@ in `.smallharness/`. In any terminal mode, `/help` lists the commands.
 
 The [docs](docs/README.md) cover each part in depth:
 [Chat](docs/chat.md) · [Research](docs/research.md) · [Planner](docs/planner.md) ·
-[Recipes](docs/recipes.md) · [Web interface](docs/web.md) ·
+[Web interface](docs/web.md) ·
 [Commands](docs/commands.md) · [Models](docs/models.md) ·
 [Engines](docs/engines.md) · [Configuration](docs/configuration.md) ·
 [Tools](docs/tools.md) · [Development](docs/development.md)
