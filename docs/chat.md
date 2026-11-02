@@ -27,19 +27,24 @@ can see them in later messages.
 | `/grep TEXT [GLOB] [DIR]` | search file contents |
 | `/run COMMAND` | run a shell command (asks first) |
 | `/write PATH` | write the last answer's code block (or its text) to a file (asks first) |
+| `/export [N[:B]] [PATH] [-f]` | save message N (default: the last answer), or its code block B, to a file kept as a relic; no asking, since you typed it. Without a path: `exports/<chat>-<N>[-<B>].<ext>`. An existing file needs `-f` |
 | `/tool NAME ARGS`, `/NAME ARGS` | any tool, with JSON, `key=value` pairs, or values in order |
 | `/agent TASK` | the model may use tools for this one message (risky ones ask) |
 | `/ask QUESTION` | a [Research](research.md) answer from the knowledge base, with references |
 | `/find WORDS` | the knowledge-base excerpts for some words, without the model |
+| `/gemini QUESTION` | ask Gemini, a larger model (see [Research](research.md#outside-sources-gemini-and-pubmed)); only the question is sent, and the answer joins the chat |
+| `/kb N [NAME]` | put message N (a `/gemini` answer, say) into the knowledge base |
 | `/note TEXT`, `/notes [WORDS]` | save a note; find notes |
-| `/plan GOAL`, `/runplan [ID]` | draft a [plan](planner.md); run it (the last one drafted here by default) |
+| `/plan GOAL`, `/runplan [ID]` | draft a [plan](code.md); run it (the last one drafted here by default) |
 | `/recall WORDS` | search this chat's turns that were folded into the summary |
 | `/tools`, `/help` | list the tools, or the commands (shown, never sent to the model) |
 
 With `/agent`, the whole message after the command is the task. Only the task and the
 final answer stay in the conversation. The tool calls and their results are kept with
 the answer so you can see them, but later messages don't carry them. Files that
-`/write`, `/agent` or a tool command writes are listed under [Relics](web.md#relics).
+`/write`, `/export`, `/agent` or a tool command writes are listed under [Relics](web.md#relics).
+On the web, *export* on a message does the same as `/export`: pick the whole message or
+one of its code blocks, and the file.
 
 ## Pinning (CAG)
 Pin a message (`/pin N`, or *pin* on the message) to keep it in every later prompt:

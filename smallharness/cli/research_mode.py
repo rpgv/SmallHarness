@@ -19,6 +19,10 @@ HELP = [
     ("/bibliography [N]", "the references [n] so far, or reference N in full"),
     ("/attach N, /detach N", "keep answer N in the context of later questions (CAG), or not"),
     ("/answers", "this session's answers; ◆ marks the attached ones"),
+    ("/gemini QUESTION", "ask Gemini, a larger model (only the question is sent); attach or /save the answer"),
+    ("/save N [NAME]", "put answer N (a Gemini answer, say) into the knowledge base"),
+    ("/pubmed WORDS", "open-access articles in PubMed Central"),
+    ("/doi DOI|PMCID|PMID|N …", "put articles into the knowledge base (N: from the last /pubmed)"),
 ]
 
 
@@ -149,6 +153,52 @@ class ResearchShell(Shell):
         for a in self.r.answers:
             mark = ui.accent("◆") if a.attached else " "
             print(f"  {mark} A{a.num} {a.question}\n      " + ui.dim(" ".join(a.text.split())[:110]))
+
+
+    # ---------------------------------------------------- outside sources
+    def cmd_gemini(self, arg):
+        if not arg:
+            print(ui.err("usage: /gemini QUESTION"))
+            return
+        with self.busy("asking Gemini"):
+            a = self.r.gemini(arg)
+        print(ui.accent("◆ ") + a.text)
+        for i, x in enumerate(a.sources, 1):
+            print(ui.dim(f"  {i}. {x['title']}  {x['url']}"))
+        print(ui.dim(f"  A{a.num} · {a.model} · /attach {a.num} keeps it in mind · /save {a.num} puts it in the knowledge base"))
+
+    def cmd_save(self, arg):
+        words = arg.split()
+        if not words:
+            print(ui.err("usage: /save N [NAME]"))
+            return
+        n = _numbers(words[0])[0]
+        with self.busy("indexing"):
+            a, res = self.r.save(n, words[1] if len(words) > 1 else "")
+        print(ui.ok(f"  ✓ A{a.num} saved as {a.saved}") + ui.dim(f"  {res.describe()}"))
+
+    def cmd_pubmed(self, arg):
+        if not arg:
+            print(ui.err("usage: /pubmed WORDS"))
+            return
+        with self.busy("searching PubMed Central"):
+            hits = self.r.pubmed(arg)
+        if not hits:
+            print(ui.dim("  no open-access articles match"))
+        for i, x in enumerate(hits, 1):
+            print(f"  {ui.sky(str(i).rjust(2))} {x.title}\n      " + ui.dim(x.cite()))
+        if hits:
+            print(ui.dim("  /doi N (or a DOI) puts an article into the knowledge base"))
+
+    def cmd_doi(self, arg):
+        if not arg:
+            print(ui.err("usage: /doi DOI|PMCID|PMID|N …"))
+            return
+        for ident in arg.replace(",", " ").split():
+            with self.busy(f"fetching {ident}"):
+                art, source, res = self.r.add_article(ident)
+            kind = "full text" if art.full_text else "abstract only"
+            print(ui.ok(f"  ✓ {art.title[:90]}") + ui.dim(f"\n      {source} · {kind} · {res.describe()}"))
 
 
 def _numbers(arg: str) -> list[int]:

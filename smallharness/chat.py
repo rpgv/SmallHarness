@@ -43,11 +43,15 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "grep": ("/grep TEXT [GLOB] [DIR]", "search file contents (safe_search_files)"),
     "run": ("/run COMMAND", "run a shell command; asks first (risky_run_command)"),
     "write": ("/write PATH", "write the last answer's code block (or text) to a file; asks first"),
+    "export": ("/export [N[:B]] [PATH] [-f]", "save message N (default: the last answer), or its code block B, "
+                                             "to a file kept as a relic; -f overwrites"),
     "tool": ("/tool NAME ARGS", "any tool; ARGS as JSON, key=value pairs, or in order"),
     "tools": ("/tools", "the tools there are"),
     "agent": ("/agent TASK", "the model may use tools for this one message (risky ones ask)"),
     "ask": ("/ask QUESTION", "research: answered from the knowledge base, citing excerpts"),
     "find": ("/find WORDS", "the knowledge-base excerpts for WORDS, without the model"),
+    "gemini": ("/gemini QUESTION", "ask Gemini, a larger model; only the question is sent, and the answer joins the chat"),
+    "kb": ("/kb N [NAME]", "put message N (a /gemini answer, say) into the knowledge base, for research"),
     "note": ("/note TEXT", "save a note (#tags optional)"),
     "notes": ("/notes [WORDS]", "find notes, or list the latest ones"),
     "plan": ("/plan GOAL", "draft a plan for GOAL"),
@@ -59,6 +63,18 @@ ALIASES = {"read": "safe_read_file", "ls": "safe_list_files", "grep": "safe_sear
            "run": "risky_run_command"}
 _WHOLE_LINE = {"risky_run_command": "command"}     # the whole line is this one argument
 _CODE = re.compile(r"```[^\n]*\n(.*?)```", re.S)
+_FENCE = re.compile(r"```([^\n`]*)\n(.*?)```", re.S)
+_PICK = re.compile(r"^#?(\d+)(?:[:.](\d+))?$")
+_EXT = {"python": "py", "py": "py", "javascript": "js", "js": "js", "typescript": "ts", "ts": "ts",
+        "bash": "sh", "sh": "sh", "shell": "sh", "zsh": "sh", "console": "sh", "json": "json", "html": "html",
+        "css": "css", "markdown": "md", "md": "md", "toml": "toml", "yaml": "yaml", "yml": "yaml", "sql": "sql",
+        "c": "c", "cpp": "cpp", "c++": "cpp", "rust": "rs", "go": "go", "java": "java", "xml": "xml",
+        "csv": "csv", "r": "r", "text": "txt", "txt": "txt"}
+
+
+def code_blocks(text: str) -> list[tuple[str, str]]:
+    """A message's fenced code blocks, in order, as (language, content)."""
+    return [(lang.strip().split()[0].lower() if lang.strip() else "", body) for lang, body in _FENCE.findall(text)]
 _ID = re.compile(r"[\w-]+")
 
 
@@ -136,6 +152,23 @@ def tool_args(tool, arg: str) -> dict:
     if len(words) > len(names):
         raise Invalid(f"too many arguments; usage: {tool.usage()}")
     return dict(zip(names, words))
+
+
+def _export_args(arg: str) -> tuple[int | None, int | None, str, bool]:
+    """`/export [N[:B]] [PATH] [-f]`: the message, its code block, the file, overwrite."""
+    try:
+        words = shlex.split(arg)
+    except ValueError as e:
+        raise Invalid(f"cannot read the arguments: {e}") from None
+    force = any(w in ("-f", "--force") for w in words)
+    words = [w for w in words if w not in ("-f", "--force")]
+    num = block = None
+    if words and _PICK.match(words[0]):
+        m = _PICK.match(words.pop(0))
+        num, block = int(m.group(1)), (int(m.group(2)) if m.group(2) else None)
+    if len(words) > 1:
+        raise Invalid(f"usage: {COMMANDS['export'][0]}")
+    return num, block, (words[0] if words else ""), force
 
 
 class Chat:
@@ -388,6 +421,17 @@ class Chat:
             blocks = _CODE.findall(source[-1].text)
             content = blocks[-1] if blocks else source[-1].text + "\n"
             return [self._tool("risky_write_file", {"path": path, "content": content}, add, events)]
+        if name == "export":
+            num, block, path, force = _export_args(arg)
+            if num is None:
+                answers = [m for m in self.line(thread) if m.role == "assistant"]
+                if not answers:
+                    raise Invalid("there is no answer to export yet; name a message: /export N [PATH]")
+                num = answers[-1].num
+            done = self.export(num, block, path, force)
+            what = f"#{num}" + (f" code block {block}" if block else "")
+            return [add("tool", f"exported {what} to {done['path']} ({done['chars']} chars; kept as a relic)",
+                        seen="", kind="export", path=done["path"])]
         if name in ("tools", "help"):
             return [add("tool", self._listing(name), seen="", kind="info")]
         if name == "agent":
@@ -404,6 +448,25 @@ class Chat:
             refs = self.research.find(need("what to look for"))
             text = "\n\n".join(f"[{x.num}] {x.cite()}\n{x.text.strip()}" for x in refs) or "nothing matches"
             return [add("tool", text, seen=f"(knowledge-base excerpts for: {arg})\n{text}", kind="research")]
+        if name == "gemini":
+            from .gemini import ask
+            found = ask(need("what to ask"), self.h.cfg["gemini"])
+            pages = "\n".join(f"{i}. {x['title']} - {x['url']}" for i, x in enumerate(found.sources, 1))
+            return [add("assistant", found.text + (f"\n\nSources:\n{pages}" if pages else ""), kind="gemini",
+                        seen=f"(Gemini, a larger model, was asked: {found.question})\n{found.text}"
+                             + (f"\n(sources:\n{pages})" if pages else ""),
+                        sources=found.sources, question=found.question, model=found.label(), skipped=found.notes)]
+        if name == "kb":
+            words = need("a message number").split(maxsplit=1)
+            if not words[0].lstrip("#").isdigit():
+                raise Invalid(f"usage: {COMMANDS['kb'][0]}")
+            m = self.get(int(words[0].lstrip("#")))
+            title = m.meta.get("question") or m.text.strip().splitlines()[0][:80]
+            slug = "-".join(re.findall(r"\w+", title.lower())[:8]) or f"message-{m.num}"
+            doc = f"# {title}\n\n{m.text.strip()}\n\n_From chat {self.id}, message #{m.num}._\n"
+            source, res = self.research.add_text(words[1] if len(words) > 1 else f"chat-{slug}", doc)
+            return [add("tool", f"#{m.num} is in the knowledge base as {source} ({res.describe()})",
+                        seen="", kind="note", source=source)]
         if name == "note":
             note = self.h.notes.add(need("the note"))
             return [add("tool", f"saved note {note.id}: {note.title}", kind="note")]
@@ -427,6 +490,35 @@ class Chat:
                 or "nothing in the folded turns matches"
             return [add("tool", text, seen=f"(earlier in this chat, about: {arg})\n{text}", kind="recall")]
         raise Invalid(f"unknown command /{name}")
+
+    def export(self, num: int, block: int | None = None, path: str = "", force: bool = False) -> dict:
+        """Save message `num`, or its code block `block` (from 1), to a workspace file,
+        kept as a relic of this chat. Without a path: exports/<chat>-<num>[-<block>].<ext>.
+        An existing file is overwritten only with `force`. This is the user's own
+        command, not a tool call, so it does not ask."""
+        m = self.get(num)
+        if block:
+            blocks = code_blocks(m.text)
+            if not blocks:
+                raise Invalid(f"#{num} has no code blocks; /export {num} saves the whole message")
+            if not 1 <= block <= len(blocks):
+                raise Invalid(f"#{num} has {len(blocks)} code block(s)")
+            lang, content = blocks[block - 1]
+            ext = _EXT.get(lang, "txt")
+        else:
+            content, ext = m.text.rstrip() + "\n", "md"
+        path = (path or f"exports/{self.id}-{num}" + (f"-{block}" if block else "") + f".{ext}").strip()
+        relics = self.h.relics
+        rel = relics.rel(path)                                  # refuses paths outside the workspace
+        target = relics.workspace / rel
+        if target.is_dir():
+            raise Invalid(f"{rel} is a folder")
+        if target.exists() and not force:
+            raise Invalid(f"{rel} already exists; add -f to overwrite it")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        relics.record(rel, f"chat:{self.id}")
+        return {"path": rel, "chars": len(content), "num": num, "block": block}
 
     def _tool(self, name: str, args: dict, add, events: Events | None) -> Message:
         ctx = self.h.tool_context()

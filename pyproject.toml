@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smallharness"
-version = "1.0.0"
+version = "4.1.0"
 description = "A rigid harness that offloads context, tool and plan management from small local models (LiteRT-LM)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,7 +15,10 @@ dependencies = []
 litert = ["litert-lm>=0.18.1"]     # the `litert-lm` CLI (`litert-lm serve`) and its Python API
 ram = ["psutil"]                   # RAM-aware sizing of model instances
 embed = ["fastembed>=0.9.0"]       # search by meaning in the knowledge base
-all = ["smallharness[litert,ram,embed]"]
+stt = ["faster-whisper", "vosk"]   # speech to text (dictation)
+tts = ["piper-tts"]                # text to speech
+bark = ["suno-bark"]               # text to speech with Bark (PyTorch, large)
+all = ["smallharness[litert,ram,embed,stt,tts]"]
 
 [project.scripts]
 smallharness = "smallharness.cli:main"

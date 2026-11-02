@@ -1,4 +1,5 @@
 NAME = "risky_write_file"
+KIND = "write"      # Code runs that "allow writing" run it without asking
 DESCRIPTION = "Create, write or edit a project file in the workspace. Always asks the user first."
 PARAMS = {
     "path": {"type": "str", "desc": "file path relative to the workspace"},

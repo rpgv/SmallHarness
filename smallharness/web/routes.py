@@ -9,12 +9,12 @@ from typing import Any, Callable, Iterator
 
 from ..config import DEFAULTS, flatten, is_secret, parse_value
 from ..engines import engine
-from ..planning import PlanRunner, clamp_persistence, create_plan, draft_plan, edit_plan, expand
+from ..planning import PlanRunner, clamp_permissions, clamp_persistence, create_plan, draft_plan, edit_plan, expand
 from .app import ApiError, Job, WebApp, WebEvents
 
 # ------------------------------------------------------------------ routes
 Route = Callable[..., Any]
-BINARY_ROUTES = {"/api/research/upload"}    # the body is a file, not JSON
+BINARY_ROUTES = {"/api/research/upload", "/api/speech/transcribe"}    # the body is a file, not JSON
 
 
 ROUTES: list[tuple[str, re.Pattern, Route]] = []
@@ -104,6 +104,41 @@ def post_research_ask(app: WebApp, q, body):
     return stream
 
 
+@route("POST", "/api/research/gemini")
+def post_research_gemini(app: WebApp, q, body):
+    """Ask Gemini, a larger model; the answer joins the session like any other."""
+    answer = app.research.gemini(_need(body, "question"))
+    return {"answer": answer.to_dict(), "research": _research_dict(app)}
+
+
+@route("POST", r"/api/research/answers/(\d+)/save")
+def post_research_save(app: WebApp, q, body, num):
+    """Put an answer into the knowledge base, as a Markdown file in the library."""
+    answer, res = app.research.save(int(num), str(body.get("name") or ""))
+    return {"saved": answer.saved, "result": res.describe(), "research": _research_dict(app)}
+
+
+@route("POST", "/api/research/pubmed")
+def post_research_pubmed(app: WebApp, q, body):
+    """Open-access articles in PubMed Central for some words."""
+    return {"articles": [a.to_dict() for a in app.research.pubmed(_need(body, "query"))]}
+
+
+@route("POST", "/api/research/doi")
+def post_research_doi(app: WebApp, q, body):
+    """Articles into the knowledge base by DOI, PMCID or PMID ('ids': one or more)."""
+    ids = _need(body, "ids").replace(",", " ").split()
+
+    def stream(ev: WebEvents) -> Iterator[dict]:
+        added = []
+        for ident in ids:
+            ev.emit({"type": "status", "text": f"fetching {ident}"})
+            art, source, res = app.research.add_article(ident)
+            added.append(dict(art.to_dict(), source=source, result=res.describe()))
+        yield {"type": "done", "added": added, "research": _research_dict(app)}
+    return stream
+
+
 @route("POST", "/api/research/find")
 def post_research_find(app: WebApp, q, body):
     refs = app.research.find(_need(body, "query"))
@@ -186,7 +221,7 @@ def delete_note(app: WebApp, q, body, nid):
 
 
 # ---------------------------------------------------------------- plans
-@route("GET", "/api/plans")
+@route("GET", "/api/code")
 def get_plans(app: WebApp, q, body):
     out = []
     for plan in app.h.plans.list(50):
@@ -197,7 +232,7 @@ def get_plans(app: WebApp, q, body):
             "specify": app.h.cfg["plan"].get("specify", "fresh")}
 
 
-@route("GET", r"/api/plans/([\w-]+)")
+@route("GET", r"/api/code/([\w-]+)")
 def get_plan(app: WebApp, q, body, pid):
     live = app.live("run|expand", pid)
     if live:
@@ -205,7 +240,7 @@ def get_plan(app: WebApp, q, body, pid):
     return app.plan_dict(app.load_plan(pid))
 
 
-@route("POST", "/api/plans")
+@route("POST", "/api/code")
 def post_plan(app: WebApp, q, body):
     if isinstance(body.get("text"), str):          # drafted by hand: no model
         app.plan, warnings = draft_plan(app.h, str(body.get("goal") or ""), body["text"])
@@ -217,7 +252,7 @@ def post_plan(app: WebApp, q, body):
     return dict(app.plan_dict(app.plan), warnings=warnings)
 
 
-@route("PUT", r"/api/plans/([\w-]+)")
+@route("PUT", r"/api/code/([\w-]+)")
 def put_plan(app: WebApp, q, body, pid):
     text = _need(body, "text")
     _not_running(app, pid)
@@ -232,7 +267,7 @@ def _not_running(app: WebApp, pid: str) -> None:
         raise ApiError(409, "this plan is running; wait for the run to end")
 
 
-@route("DELETE", r"/api/plans/([\w-]+)")
+@route("DELETE", r"/api/code/([\w-]+)")
 def delete_plan(app: WebApp, q, body, pid):
     _not_running(app, pid)
     app.h.plans.delete(pid)
@@ -241,7 +276,7 @@ def delete_plan(app: WebApp, q, body, pid):
     return {"deleted": pid}
 
 
-@route("PUT", r"/api/plans/([\w-]+)/persistence")
+@route("PUT", r"/api/code/([\w-]+)/persistence")
 def put_plan_persistence(app: WebApp, q, body, pid):
     """How many times a failed step is tried again (persistence_max: until it succeeds)."""
     live = app.live("run", pid)
@@ -252,7 +287,19 @@ def put_plan_persistence(app: WebApp, q, body, pid):
     return app.plan_dict(plan)
 
 
-@route("PUT", r"/api/plans/([\w-]+)/steps")
+@route("PUT", r"/api/code/([\w-]+)/permissions")
+def put_plan_permissions(app: WebApp, q, body, pid):
+    """What a run does without asking: ask (nothing), write (file writes), all (also commands).
+    A running plan takes the new mode from its next tool call."""
+    live = app.live("run", pid)
+    plan = live or app.load_plan(pid)
+    plan.permissions = clamp_permissions(body.get("permissions"))
+    if not live:
+        app.h.plans.save(plan)
+    return app.plan_dict(plan)
+
+
+@route("PUT", r"/api/code/([\w-]+)/steps")
 def put_plan_steps(app: WebApp, q, body, pid):
     """Tick steps off by hand, or untick them so the next run does them again
     ('steps' empty: every step)."""
@@ -263,12 +310,15 @@ def put_plan_steps(app: WebApp, q, body, pid):
     return app.plan_dict(plan)
 
 
-@route("POST", r"/api/plans/([\w-]+)/run")
+@route("POST", r"/api/code/([\w-]+)/run")
 def post_run(app: WebApp, q, body, pid):
     plan = app.load_plan(pid)
     mode = body.get("mode", "fresh")
     if mode not in ("fresh", "continuous"):
         raise ApiError(400, "mode must be fresh or continuous")
+    # Checked before the run starts, so a bad value is an error here, not in the run.
+    persistence = None if body.get("persistence") is None else clamp_persistence(body["persistence"])
+    permissions = None if body.get("permissions") is None else clamp_permissions(body["permissions"])
 
     def produce(ev: WebEvents, job: Job) -> Iterator[dict]:
         app.ensure_loaded(ev)
@@ -281,9 +331,8 @@ def post_run(app: WebApp, q, body, pid):
             ev.emit({"type": "task_end", "num": t.num, "status": t.status, "result": t.result,
                      "plan": app.plan_dict(plan)})
 
-        persistence = body.get("persistence")
         runner = PlanRunner(app.h, plan, mode, ev, parallel=bool(body.get("parallel")) or None,
-                            persistence=None if persistence is None else clamp_persistence(persistence))
+                            persistence=persistence, permissions=permissions)
         keep_going = bool(body.get("continue_on_failure"))
         runner.run(start, end, lambda t: keep_going)
         yield {"type": "done", "reason": "finished" if plan.finished else "stopped",
@@ -291,7 +340,7 @@ def post_run(app: WebApp, q, body, pid):
     return app.start_job("run", pid, "running a plan", produce)
 
 
-@route("POST", r"/api/plans/([\w-]+)/expand")
+@route("POST", r"/api/code/([\w-]+)/expand")
 def post_expand(app: WebApp, q, body, pid):
     """Expansion passes: each makes the chosen steps' details deeper (all steps when
     'steps' is empty), steps in parallel as RAM allows."""
@@ -387,6 +436,17 @@ def put_chat_pin(app: WebApp, q, body, cid, num):
     return chat.to_dict()
 
 
+@route("POST", r"/api/chats/([\w-]+)/export")
+def post_chat_export(app: WebApp, q, body, cid):
+    """Save message 'num', or its code block 'block' (from 1), to 'path' (default under
+    exports/), kept as a relic; 'force' overwrites an existing file."""
+    chat = app.h.chats.load(cid)
+    num, block = body.get("num"), body.get("block") or None
+    if not isinstance(num, int) or (block is not None and not isinstance(block, int)):
+        raise ApiError(400, "'num' (and 'block') are numbers")
+    return chat.export(num, block, str(body.get("path") or ""), bool(body.get("force")))
+
+
 @route("POST", r"/api/chats/([\w-]+)/rewind")
 def post_chat_rewind(app: WebApp, q, body, cid):
     """Clear everything after message 'to' (0: all); with 'thread', only that thread's replies."""
@@ -397,6 +457,22 @@ def post_chat_rewind(app: WebApp, q, body, cid):
         raise ApiError(400, "'to' (and 'thread') are message numbers")
     gone = chat.rewind(to, thread)
     return dict(chat.to_dict(), cleared=gone)
+
+
+# ------------------------------------------------------------------ keys
+@route("GET", "/api/keys")
+def get_keys(app: WebApp, q, body):
+    """Which API keys are set (never the keys themselves)."""
+    from .. import keys
+    return {"keys": keys.status(), "file": str(keys.keys_file())}
+
+
+@route("PUT", r"/api/keys/(\w+)")
+def put_key(app: WebApp, q, body, name):
+    """Save a key in the keys file (outside every project); an empty value removes it."""
+    from .. import keys
+    keys.put(name, str(body.get("value") or ""))
+    return {"keys": keys.status(), "file": str(keys.keys_file())}
 
 
 # ---------------------------------------------------------------- relics
@@ -485,6 +561,60 @@ def delete_model(app: WebApp, q, body, name):
     eng = engine(app.h.cfg)
     got = eng.delete(eng.plan_delete(unquote(name), in_use=True))
     return {"deleted": got.items, "freed": got.freed, "note": got.note}
+
+
+# ---------------------------------------------------------------- speech
+@route("GET", "/api/speech")
+def get_speech(app: WebApp, q, body):
+    from .. import speech
+    return speech.status(app.h.cfg)
+
+
+@route("POST", "/api/speech/transcribe")
+def post_speech_transcribe(app: WebApp, q, body):
+    """Speech to text: the body is the recording (WAV from the page)."""
+    from .. import speech
+    return speech.transcribe(app.h.cfg, body["data"], q.get("engine") or None, None, q.get("language") or None)
+
+
+@route("POST", "/api/speech/speak")
+def post_speech_speak(app: WebApp, q, body):
+    """Text to speech: the WAV, base64-encoded."""
+    import base64
+
+    from .. import speech
+    r = speech.speak(app.h.cfg, _need(body, "text"), body.get("engine") or None, body.get("voice") or None)
+    return {"audio": base64.b64encode(r["audio"]).decode(), "type": "audio/wav", "engine": r["engine"],
+            "voice": r["voice"], "seconds": r["seconds"]}
+
+
+@route("POST", "/api/speech/pull")
+def post_speech_pull(app: WebApp, q, body):
+    from .. import speech
+    name = _need(body, "name")
+    if not speech.parse(name):
+        raise ApiError(400, "a speech model: whisper:SIZE, vosk:NAME, piper:VOICE or bark")
+
+    def stream(ev: WebEvents) -> Iterator[dict]:
+        last = [0.0]
+
+        def progress(done, total):
+            if time.time() - last[0] > 0.25 or done == total:
+                last[0] = time.time()
+                ev.emit({"type": "progress", "done": done, "total": total})
+        item = speech.pull(app.h.cfg, name, progress, force=bool(body.get("force")))
+        yield {"type": "done", "name": item.name, "detail": f"{item.size_mb} MB in {item.path}",
+               "speech": speech.status(app.h.cfg)}
+    return stream
+
+
+@route("DELETE", r"/api/speech/models/([^/]+)")
+def delete_speech_model(app: WebApp, q, body, name):
+    from urllib.parse import unquote
+
+    from .. import speech
+    item = speech.delete(app.h.cfg, unquote(name))
+    return {"deleted": item.name, "speech": speech.status(app.h.cfg)}
 
 
 # ------------------------------------------------------------- settings

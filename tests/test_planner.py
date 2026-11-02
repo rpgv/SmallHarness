@@ -178,3 +178,52 @@ class Persistence(WorkspaceTest):
         self.assertNotIn("CHECK", plan.tasks[0].detail)
         expand(h, plan, [1], parallel=False, checks=True)
         self.assertEqual(len(plan.tasks[0].checks), 1)                             # no duplicates
+
+
+class Permissions(WorkspaceTest):
+    """Code runs: ask (default), allow writing (files without asking), allow all."""
+    WRITE = '<tool>{"name": "risky_write_file", "args": {"path": "x.txt", "content": "hi"}}</tool>'
+    RUN = '<tool>{"name": "risky_run_command", "args": {"command": "echo ran > y.txt"}}</tool>'
+
+    def run_plan(self, permissions):
+        from smallharness.agent import Events
+
+        class Asked(Events):
+            asked: list = []
+
+            def permit(self, tool, args):
+                self.asked.append(tool.name)
+                return False                        # the user says no to whatever is asked
+        events = Asked()
+        events.asked = []
+        h = self.harness([self.WRITE, "DONE: wrote", self.RUN, "DONE: ran"])
+        plan, _ = draft_plan(h, "g", "[risky_write_file] Write x\n[risky_run_command] Run it")
+        self.assertEqual(plan.permissions, "ask")                                 # the default
+        PlanRunner(h, plan, events=events, persistence=0, permissions=permissions).run()
+        return h, plan, events.asked
+
+    def test_ask_asks_for_both(self):
+        _, _, asked = self.run_plan(None)
+        self.assertEqual(asked, ["risky_write_file", "risky_run_command"])   # both asked (and refused)
+        self.assertFalse((self.ws / "x.txt").exists())
+
+    def test_allow_writing_still_asks_for_commands(self):
+        h, plan, asked = self.run_plan("write")
+        self.assertEqual((self.ws / "x.txt").read_text(), "hi")
+        self.assertEqual(asked, ["risky_run_command"])
+        self.assertFalse((self.ws / "y.txt").exists())
+        self.assertEqual(h.plans.load(plan.id).permissions, "write")
+
+    def test_allow_all_asks_for_nothing(self):
+        _, plan, asked = self.run_plan("all")
+        self.assertEqual(asked, [])
+        self.assertTrue((self.ws / "x.txt").exists() and (self.ws / "y.txt").exists())
+        self.assertEqual([t.status for t in plan.tasks], ["done", "done"])
+
+    def test_modes_by_name(self):
+        from smallharness.errors import Invalid
+        from smallharness.planning import clamp_permissions
+        self.assertEqual([clamp_permissions(v) for v in ("ask", "allow writing", "Allow-All", "write")],
+                         ["ask", "write", "all", "write"])
+        with self.assertRaises(Invalid):
+            clamp_permissions("everything")

@@ -8,8 +8,9 @@ go into detail.
   pins, threads, rewinding, and how the context is kept small.
 - [Research](research.md): the knowledge base, asking, references, attaching, notes,
   and how searching works.
-- [Planner](planner.md): creating, expanding, editing and running plans.
+- [Code](code.md): creating, expanding, editing and running plans.
 - [Web interface](web.md): every tab, Relics, and how the local server is protected.
+- [Speech](speech.md): dictation (Whisper, Vosk) and reading answers aloud (Piper, Bark).
 - [Commands](commands.md): the terminal modes, their commands, and one-off shell use.
 
 **Setting it up**

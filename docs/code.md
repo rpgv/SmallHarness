@@ -1,4 +1,4 @@
-# Planner
+# Code mode (the planner)
 
 Type a goal and the model writes a plan in a clean context, one step per line:
 `N. [tool] what to do (after: N)`. Code: `plans.py`, `planning.py`.
@@ -36,6 +36,17 @@ Type a goal and the model writes a plan in a clean context, one step per line:
   ends the retries. Set it with `/persist N|max`, `--persist`, or the slider on the
   web (it can be changed while a plan runs); new plans start at `[plan].persistence`
   (default 2).
+- **Permissions.** What a run does without asking you, one of three modes:
+  - `ask` (the default): asks before every file write and every command.
+  - `write` (*allow writing*): writes workspace files without asking, still asks
+    before running a command.
+  - `all` (*allow all*): writes files and runs commands without asking.
+
+  Set it with `/permissions ask|write|all`, `--permissions`, or the Permissions menu on
+  the web (a running plan takes the change from its next tool call); new plans start at
+  `[plan].permissions`. Which risky tools count as writing is set by each tool's `KIND`
+  (see [Tools](tools.md#writing-your-own)). A call allowed without asking still shows
+  in the log.
 - **Running.** `/run fresh` gives each step a new, empty context: the plan, the step's
   details and the results of the steps it depends on. `/run continuous` carries one
   context across all steps, refreshed as it fills. `parallel` runs independent steps

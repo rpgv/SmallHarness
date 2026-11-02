@@ -13,6 +13,10 @@ Risk is part of the name, so it is visible wherever the tool shows up:
     risky_*  type 1 - always asks the user before every call
 Files whose NAME has neither prefix are rejected.
 
+A risky tool may also say what it does, for the permission modes of Code runs:
+    KIND = "write"     # only writes files in the workspace ("allow writing" runs it without asking)
+    KIND = "command"   # runs programs (the default for risky tools: always asks unless "allow all")
+
 Folders searched, later ones overriding earlier: smallharness/tools/builtin,
 <workspace>/.smallharness/tools, then [tools].extra_dirs.
 """
@@ -75,6 +79,7 @@ class Tool:
     params: dict[str, dict]
     run: Callable[[dict, ToolContext], str]
     source: Path | None = None
+    kind: str = ""                 # risky tools: "write" or "command" (see KIND above)
 
     @property
     def risk_type(self) -> int:
@@ -84,6 +89,11 @@ class Tool:
     @property
     def needs_permission(self) -> bool:
         return self.risk_type == 1
+
+    @property
+    def effect(self) -> str:
+        """For risky tools: "write" (writes workspace files) or "command" (anything else)."""
+        return "" if not self.needs_permission else ("write" if self.kind == "write" else "command")
 
     def signature(self) -> str:
         args = ", ".join(k if "default" not in v else f"{k}?" for k, v in self.params.items())
@@ -154,7 +164,10 @@ class ToolRegistry:
         for attr in ("NAME", "DESCRIPTION", "run"):
             if not hasattr(mod, attr):
                 raise ValueError(f"missing {attr}")
-        return Tool(mod.NAME, mod.DESCRIPTION.strip(), getattr(mod, "PARAMS", {}), mod.run, f)
+        kind = getattr(mod, "KIND", "")
+        if kind not in ("", "write", "command"):
+            raise ValueError(f"KIND must be 'write' or 'command', not {kind!r}")
+        return Tool(mod.NAME, mod.DESCRIPTION.strip(), getattr(mod, "PARAMS", {}), mod.run, f, kind)
 
     def register(self, tool: Tool) -> None:
         if not any(tool.name.startswith(p) for p in RISK_PREFIXES):

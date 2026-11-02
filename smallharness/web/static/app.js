@@ -1,5 +1,5 @@
 "use strict";
-// SmallHarness web interface: Chat, Research, Notes, Planner, Models, Settings, and
+// SmallHarness web interface: Chat, Research, Notes, Code, Models, Settings, and
 // Relics (the files plans made) under the tabs. Plain DOM,
 // no libraries; every text is set with textContent, so model output and notes are
 // never interpreted as HTML.
@@ -109,7 +109,7 @@ function renderStatus(s) {
   const rows = [
     ["workspace", s.workspace], ["model", `${s.model.name} (${s.model.backend})`],
     ["loaded", s.model.loaded ? `yes · ${s.instances} instance(s)` : "no: loads when first used"],
-    ["instances fit", s.ram_managed ? `${s.capacity} (the planner uses up to this many)` : "1 (RAM not managed)"],
+    ["instances fit", s.ram_managed ? `${s.capacity} (Code uses up to this many)` : "1 (RAM not managed)"],
     ["context", `${s.model.context_tokens} tokens${s.model.context_note ? " · " + s.model.context_note : ""}`],
     ["search", s.search], ["knowledge base", `${s.knowledge.sources} source(s), ${s.knowledge.chunks} chunks`],
     ["notes", String(s.notes)],
@@ -250,8 +250,8 @@ $("chat-title").addEventListener("change", async () => {
 const chatLine = (thread) => (chat ? chat.messages.filter((m) => m.thread === thread) : []);
 function who(m) {
   if (m.role === "user") return "you";
-  if (m.role === "assistant") return { research: "research", plan: "plan", agent: "model + tools" }[m.kind] || "model";
-  return { info: "help", error: "error", note: "notes", recall: "recall", plan: "plan run",
+  if (m.role === "assistant") return { research: "research", plan: "plan", agent: "model + tools", gemini: "Gemini" }[m.kind] || "model";
+  return { info: "help", error: "error", export: "export", note: "notes", recall: "recall", plan: "plan run",
            research: "excerpts" }[m.kind] || "tool";
 }
 // A user message: its command lines in red, the question after them.
@@ -288,8 +288,8 @@ function chatBody(m) {
       el("pre", { text: (m.meta.steps || []).map((x) => (x.role === "tool" ? "└ " : "▸ ") + x.text).join("\n") })));
   }
   if (m.meta.plan) {
-    out.push(el("div", { class: "cmsg-foot" }, el("button", { class: "small link", text: `open plan ${m.meta.plan} in the planner`,
-      onclick: () => { show("planner"); openPlan(m.meta.plan); } })));
+    out.push(el("div", { class: "cmsg-foot" }, el("button", { class: "small link", text: `open plan ${m.meta.plan} in Code`,
+      onclick: () => { show("code"); openPlan(m.meta.plan); } })));
   }
   return out;
 }
@@ -302,6 +302,17 @@ function chatCard(m, inThread) {
                                        onclick: () => pinMessage(m.num, !m.pinned) }));
   if (m.role === "user") acts.push(el("button", { class: "small link", text: "edit", title: "clear from here on and put this message back in the box",
                                                   onclick: () => editMessage(m) }));
+  if (m.role === "assistant" && m.text.trim()) {
+    const b = el("button", { class: "small link", text: "speak", title: "read it aloud (text to speech, set under Models → Speech)" });
+    b.addEventListener("click", () => speakText(m.text, b));
+    acts.push(b);
+  }
+  if (m.kind === "gemini") acts.push(el("button", { class: "small link", text: "to knowledge base",
+                                               title: "put this answer into the knowledge base (/kb), for research",
+                                               onclick: () => sendChat(`/kb ${m.num}`, inThread ? m.thread : 0) }));
+  if (m.role !== "user" && m.text.trim()) acts.push(el("button", { class: "small link", text: "export",
+                                                   title: "save this message, or one of its code blocks, to a file (a relic)",
+                                                   onclick: () => exportMessage(m) }));
   acts.push(el("button", { class: "small link", text: "rewind here", title: "clear everything after this message",
                            onclick: () => rewindTo(m) }));
   const replies = !inThread && chat.threads[m.num];
@@ -382,6 +393,40 @@ function renderChatHelp() {
 }
 
 // ------------------------------------------------------ pins and rewind
+// Export: the whole message, or one code block, to a workspace file kept as a relic.
+const EXT = { python: "py", py: "py", javascript: "js", js: "js", typescript: "ts", ts: "ts", bash: "sh", sh: "sh",
+              shell: "sh", json: "json", html: "html", css: "css", markdown: "md", md: "md", toml: "toml", yaml: "yaml",
+              yml: "yaml", sql: "sql", c: "c", cpp: "cpp", rust: "rs", go: "go", java: "java" };
+function codeBlocks(text) {
+  return [...text.matchAll(/```([^\n`]*)\n([\s\S]*?)```/g)].map((x) => ({ lang: (x[1].trim().split(/\s+/)[0] || "").toLowerCase(), body: x[2] }));
+}
+function exportMessage(m) {
+  const blocks = codeBlocks(m.text);
+  const part = $("export-part");
+  part.replaceChildren(el("option", { value: "0", text: "the whole message" }),
+    ...blocks.map((b, i) => el("option", { value: String(i + 1),
+      text: `code block ${i + 1}${b.lang ? " (" + b.lang + ")" : ""}: ${(b.body.split("\n")[0] || "").slice(0, 40)}` })));
+  const suggest = () => {
+    const k = Number(part.value);
+    $("export-path").value = `exports/${chat.id}-${m.num}` + (k ? `-${k}.${EXT[blocks[k - 1].lang] || "txt"}` : ".md");
+  };
+  part.value = blocks.length ? "1" : "0";
+  part.onchange = suggest;
+  suggest();
+  $("export-force").checked = false;
+  const dlg = $("export");
+  dlg.onclose = async () => {
+    if (dlg.returnValue !== "save") return;
+    const block = Number(part.value) || null;
+    try {
+      const r = await api("POST", `/api/chats/${chat.id}/export`, { num: m.num, block, path: $("export-path").value.trim(),
+                                                                force: $("export-force").checked });
+      toast(`saved ${r.path} (${r.chars} chars) · a relic`);
+    } catch (e) { toast(e.message, true); }
+  };
+  dlg.returnValue = "";
+  dlg.showModal();
+}
 async function pinMessage(num, pinned) {
   try { chat = await api("PUT", `/api/chats/${chat.id}/messages/${num}/pin`, { pinned }); renderChat(); }
   catch (e) { toast(e.message, true); }
@@ -564,15 +609,22 @@ function citedText(text) {
 }
 const speeds = {};   // answer number -> its speed line (the server does not keep timings)
 function answerCard(a) {
-  return el("div", { class: "answer" + (a.attached ? " attached" : "") },
-    el("div", { class: "question", text: a.question }),
-    citedText(a.text),
+  const web = a.kind === "gemini";
+  return el("div", { class: "answer" + (a.attached ? " attached" : "") + (web ? " web" : "") },
+    el("div", { class: "question", text: (web ? "✦ " : "") + a.question }),
+    web ? el("div", { class: "cmsg-text", text: a.text }) : citedText(a.text),
+    web && a.sources.length ? el("ol", { class: "sources" }, ...a.sources.map((x) =>
+      el("li", {}, el("a", { href: x.url, target: "_blank", rel: "noopener noreferrer", text: x.title })))) : null,
     el("div", { class: "answer-foot" },
       el("span", { class: "muted", text: `A${a.num}` + (a.refs.length ? " · refs " : "") }),
       ...a.refs.map((n) => el("a", { class: "cite", href: "#", text: `[${n}]`,
                                      onclick: (e) => { e.preventDefault(); openRef(n); } })),
       a.scope.length ? el("span", { class: "muted", text: ` · scope ${a.scope.join(", ")}` }) : null,
+      web ? el("span", { class: "muted", text: ` · ${a.model || "Gemini"}` }) : null,
       el("span", { class: "grow" }),
+      a.saved ? el("span", { class: "muted", text: `in the knowledge base ` })
+              : el("button", { class: "small secondary", text: "Save", title: "put this answer into the knowledge base",
+                               onclick: () => saveAnswer(a.num) }),
       el("button", { class: "small " + (a.attached ? "" : "secondary"), text: a.attached ? "Attached" : "Attach",
                      title: a.attached ? "detach: later questions no longer see it"
                                        : "attach: later questions keep this answer in mind",
@@ -599,6 +651,77 @@ function renderAttached(r) {
         el("strong", { text: `A${a.num} ` }), document.createTextNode(a.question)),
       el("button", { class: "small link", text: "detach", onclick: () => setAttached(a.num, false) }))));
 }
+async function saveAnswer(num) {
+  setBusy("indexing");
+  try {
+    const r = await api("POST", `/api/research/answers/${num}/save`, {});
+    renderResearch(r.research);
+    toast(`saved as ${r.saved} · ${r.result}`);
+  } catch (e) { toast(e.message, true); }
+  setBusy("");
+}
+async function askGemini(q) {
+  const box = $("answers");
+  const pending = el("div", { class: "answer pending" }, el("div", { class: "question", text: "✦ " + q }),
+                     el("div", { class: "muted", text: "asking Gemini…" }));
+  box.append(pending);
+  box.scrollTop = box.scrollHeight;
+  $("gemini-btn").disabled = true;
+  try { renderResearch((await api("POST", "/api/research/gemini", { question: q })).research); }
+  catch (e) { pending.lastChild.textContent = e.message; pending.classList.add("failed"); }
+  $("gemini-btn").disabled = false;
+}
+$("gemini-btn").addEventListener("click", () => {
+  const q = $("ask-input").value.trim();
+  if (!q) { toast("type what to ask Gemini", true); return; }
+  $("ask-input").value = "";
+  askGemini(q);
+});
+
+// PubMed: open-access articles, added to the knowledge base by DOI
+function pubmedStatus(text) { $("pubmed-status").textContent = text; }
+async function addArticles(ids) {
+  setBusy("fetching articles");
+  try {
+    await stream("/api/research/doi", { ids }, (ev) => {
+      if (ev.type === "status") pubmedStatus(ev.text + "…");
+      else if (ev.type === "done") {
+        renderResearch(ev.research);
+        pubmedStatus(ev.added.map((a) => `added ${a.title.slice(0, 60)} (${a.full_text ? "full text" : "abstract only"})`).join(" · "));
+        for (const a of ev.added) for (const b of document.querySelectorAll(`[data-article="${CSS.escape(a.pmcid || a.doi)}"]`)) {
+          b.textContent = "added"; b.disabled = true;
+        }
+      }
+    });
+  } catch (e) { pubmedStatus(e.message); }
+  setBusy("");
+}
+$("pubmed-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const query = $("pubmed-query").value.trim();
+  if (!query) return;
+  pubmedStatus("searching PubMed Central…");
+  try {
+    const r = await api("POST", "/api/research/pubmed", { query });
+    pubmedStatus(r.articles.length ? `${r.articles.length} open-access article(s)` : "no open-access articles match");
+    $("pubmed-results").replaceChildren(...r.articles.map((a) => el("li", { class: "article" },
+      el("div", { class: "grow" },
+        el("strong", { text: a.title }), el("br"),
+        el("span", { class: "muted", text: a.cite + " " }),
+        a.pmcid ? el("a", { href: `https://pmc.ncbi.nlm.nih.gov/articles/${a.pmcid}/`, target: "_blank",
+                            rel: "noopener noreferrer", text: "open" }) : null),
+      el("button", { class: "small", text: "Add", "data-article": a.pmcid || a.doi,
+                     title: "put it into the knowledge base", onclick: () => addArticles(a.pmcid || a.doi) }))));
+  } catch (err) { pubmedStatus(err.message); }
+});
+$("doi-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const ids = $("doi-input").value.trim();
+  if (!ids) return;
+  $("doi-input").value = "";
+  addArticles(ids);
+});
+
 async function setAttached(num, attached) {
   try { renderResearch(await api("PUT", `/api/research/answers/${num}/attach`, { attached })); }
   catch (e) { toast(e.message, true); }
@@ -852,11 +975,11 @@ $("note-delete").addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 
-// ================================================================ planner
+// ================================================================ code (plans)
 let plan = null;
 async function loadPlans() {
   try {
-    const data = await api("GET", "/api/plans");
+    const data = await api("GET", "/api/code");
     $("plan-list").replaceChildren(...data.plans.map((p) =>
       el("li", { class: "item" + (plan && p.id === plan.id ? " active" : ""), onclick: () => openPlan(p.id) },
         el("div", { class: "grow" },
@@ -868,10 +991,10 @@ async function loadPlans() {
     if (!plan && data.current) openPlan(data.current);
   } catch (e) { toast(e.message, true); }
 }
-loaders.planner = loadPlans;
+loaders.code = loadPlans;
 async function openPlan(id, keepLog = false) {
   try {
-    renderPlan(await api("GET", `/api/plans/${id}`));
+    renderPlan(await api("GET", `/api/code/${id}`));
     if (!keepLog) ownLog($("run-log"), id);
     loadPlans();
   } catch (e) { toast(e.message, true); }
@@ -908,6 +1031,8 @@ function persistenceLabel(n, max) {
   return n ? `${n} retr${n === 1 ? "y" : "ies"} per failed step` : "0: a failed step is not tried again";
 }
 function showPersistence(p) {
+  $("run-perms").value = p.permissions || "ask";
+  $("run-perms").classList.toggle("danger", (p.permissions || "ask") !== "ask");
   const g = $("run-persist");
   g.max = p.persistence_max;
   g.value = p.persistence;
@@ -918,13 +1043,19 @@ $("run-persist").addEventListener("input", (e) => {
 });
 $("run-persist").addEventListener("change", async (e) => {
   if (!plan) return;
-  try { plan = await api("PUT", `/api/plans/${plan.id}/persistence`, { persistence: Number(e.target.value) }); }
+  try { plan = await api("PUT", `/api/code/${plan.id}/persistence`, { persistence: Number(e.target.value) }); }
+  catch (err) { toast(err.message, true); }
+  showPersistence(plan);
+});
+$("run-perms").addEventListener("change", async (e) => {
+  if (!plan) return;
+  try { plan = await api("PUT", `/api/code/${plan.id}/permissions`, { permissions: e.target.value }); }
   catch (err) { toast(err.message, true); }
   showPersistence(plan);
 });
 async function markSteps(steps, done) {
   if (!plan) return;
-  try { renderPlan(await api("PUT", `/api/plans/${plan.id}/steps`, { steps, done })); loadPlans(); }
+  try { renderPlan(await api("PUT", `/api/code/${plan.id}/steps`, { steps, done })); loadPlans(); }
   catch (e) { toast(e.message, true); openPlan(plan.id, true); }
 }
 $("plan-untick").addEventListener("click", () => {
@@ -934,7 +1065,7 @@ async function deletePlan(id, goal) {
   if (running && plan && plan.id === id) { toast("this plan is running; wait for the run to end", true); return; }
   if (!confirm(`Delete the plan “${goal}”? Files its runs wrote stay.`)) return;
   try {
-    await api("DELETE", `/api/plans/${id}`);
+    await api("DELETE", `/api/code/${id}`);
     if (plan && plan.id === id) {
       plan = null;
       $("plan-detail").hidden = true;
@@ -953,7 +1084,7 @@ $("plan-form").addEventListener("submit", async (e) => {
   if (!goal) return;
   setBusy("planning");
   try {
-    const p = await api("POST", "/api/plans", { goal });
+    const p = await api("POST", "/api/code", { goal });
     $("plan-goal").value = "";
     renderPlan(p);
     (p.warnings || []).forEach((w) => toast(w));
@@ -1088,7 +1219,7 @@ $("plan-edit-save").addEventListener("click", async () => {
   const body = { goal: $("plan-edit-goal").value.trim(), text };
   if (!body.text.trim()) { toast("write at least one step", true); return; }
   try {
-    const p = planEditing ? await api("PUT", `/api/plans/${planEditing}`, body) : await api("POST", "/api/plans", body);
+    const p = planEditing ? await api("PUT", `/api/code/${planEditing}`, body) : await api("POST", "/api/code", body);
     if (!planEditing) $("plan-goal").value = "";
     $("run-log").replaceChildren();
     renderPlan(p);
@@ -1128,7 +1259,7 @@ async function joinRun(job, reveal) {
   if (running) return;
   if (job.kind === "chat") return joinChat(job, reveal);
   setRunning(true);                    // claimed, so the next state check does not join twice
-  if (reveal) show("planner");
+  if (reveal) show("code");
   await openPlan(job.target);
   setRunning(false);
   followRun(job.kind, job.target, (cb) => stream(`/api/jobs/${job.id}/events?since=0`, undefined, cb));
@@ -1210,7 +1341,7 @@ $("expand-btn").addEventListener("click", async () => {
   if (!plan) return;
   const body = { steps: stepNumbers($("expand-steps").value), times: Number($("expand-times").value) || 1,
                  parallel: $("expand-parallel").checked, checks: $("expand-checks").checked };
-  await startRun("expand", plan.id, `/api/plans/${plan.id}/expand`, body);
+  await startRun("expand", plan.id, `/api/code/${plan.id}/expand`, body);
 });
 // A plan shown is redrawn from the run's events only if it is the plan the run is on.
 const showRunPlan = (p) => { if (plan && plan.id === p.id) renderPlan(p); };
@@ -1222,8 +1353,9 @@ RUNS.expand = { busy: "expanding the plan", after: afterPlanRun,
   } };
 $("run-btn").addEventListener("click", async () => {
   if (!plan) return;
-  const body = { mode: $("run-mode").value, parallel: $("run-parallel").checked, persistence: Number($("run-persist").value) };
-  await startRun("run", plan.id, `/api/plans/${plan.id}/run`, body);
+  const body = { mode: $("run-mode").value, parallel: $("run-parallel").checked, persistence: Number($("run-persist").value),
+                 permissions: $("run-perms").value };
+  await startRun("run", plan.id, `/api/code/${plan.id}/run`, body);
 });
 RUNS.run = { busy: "running the plan", after: afterPlanRun,
   onEvent: (ev, log) => {
@@ -1337,7 +1469,171 @@ async function loadModels() {
       el("td", { class: "actions" }, el("button", { class: "small", text: "Pull", onclick: () => pull(x.name) })))));
   } catch (e) { toast(e.message, true); }
 }
-loaders.models = loadModels;
+loaders.models = () => { loadModels(); loadSpeech(); };
+
+// ================================================================ speech
+// The Speech card (Models tab): engines, settings, and speech models to pull.
+let speechState = null;
+async function loadSpeech() {
+  try { renderSpeech(await api("GET", "/api/speech")); } catch (e) { toast(e.message, true); }
+}
+function renderSpeech(st) {
+  speechState = st;
+  const s = st.settings;
+  $("speech-where").textContent = "· " + st.dir;
+  const pulled = (engine) => st.local.filter((i) => i.engine === engine).map((i) => i.name.split(":")[1]);
+  const fill = (sel, names, current) => {
+    const opts = [...new Set([...names, current].filter(Boolean))];
+    sel.replaceChildren(...opts.map((n) => el("option", { value: n, text: n + (names.includes(n) ? "" : " (not pulled)") })));
+    sel.value = current;
+  };
+  $("speech-stt").value = s.stt; $("speech-tts").value = s.tts;
+  fill($("speech-whisper"), pulled("whisper"), s.whisper_model);
+  fill($("speech-vosk"), pulled("vosk"), s.vosk_model);
+  fill($("speech-piper"), pulled("piper"), s.piper_voice);
+  $("speech-language").value = s.language || "";
+  $("speech-bark").value = s.bark_voice || "";
+  $("speech-ready").textContent = `Speech to text: ${st.stt_ready || "ready"} · Text to speech: ${st.tts_ready || "ready"}`;
+  $("speech-engines").replaceChildren(...Object.entries(st.engines).map(([name, e]) => el("tr", {},
+    el("td", { text: name }), el("td", { text: e.kind.toUpperCase() }),
+    el("td", { class: e.installed ? "" : "muted", text: e.installed ? "installed" : `not installed: pip install ${e.pip}` }))));
+  $("speech-models").replaceChildren(
+    ...st.local.map((i) => el("tr", {}, el("td", {}, el("strong", { text: i.name })), el("td", { text: `${i.size_mb} MB` }),
+      el("td", { class: "muted", text: "pulled" }),
+      el("td", {}, el("button", { class: "small link", text: "delete", onclick: () => deleteSpeech(i.name) })))),
+    ...st.available.map((i) => el("tr", {}, el("td", { text: i.name }), el("td", { text: `${i.size_mb} MB` }),
+      el("td", { class: "muted", text: i.note }),
+      el("td", {}, el("button", { class: "small secondary", text: "Pull", onclick: () => pullSpeech(i.name) })))));
+  for (const b of document.querySelectorAll("button.mic")) b.hidden = s.stt === "none";
+}
+async function setSpeech(key, value) {
+  try {
+    const r = await api("POST", "/api/config", { values: { ["speech." + key]: value } });
+    (r.done.length ? r.done : [`speech.${key} = ${value}`]).forEach((d) => toast(d));
+    loadSpeech();
+  } catch (e) { toast(e.message, true); }
+}
+for (const [id, key] of [["speech-stt", "stt"], ["speech-tts", "tts"], ["speech-whisper", "whisper_model"],
+                         ["speech-vosk", "vosk_model"], ["speech-piper", "piper_voice"], ["speech-language", "language"],
+                         ["speech-bark", "bark_voice"]]) {
+  $(id).addEventListener("change", (e) => setSpeech(key, e.target.value.trim()));
+}
+async function pullSpeech(name) {
+  const bar = $("speech-progress");
+  bar.hidden = false;
+  bar.firstElementChild.style.width = "0";
+  bar.lastElementChild.textContent = `${name}: starting…`;
+  try {
+    await stream("/api/speech/pull", { name }, (ev) => {
+      if (ev.type === "progress") {
+        bar.firstElementChild.style.width = (ev.total ? (ev.done / ev.total) * 100 : 0) + "%";
+        bar.lastElementChild.textContent = `${name}: ${gb(ev.done)}${ev.total ? " / " + gb(ev.total) : ""}`;
+      } else if (ev.type === "done") {
+        bar.lastElementChild.textContent = `${ev.name}: ${ev.detail}`;
+        renderSpeech(ev.speech);
+      }
+    });
+  } catch (e) { bar.lastElementChild.textContent = `${name}: ${e.message}`; }
+}
+async function deleteSpeech(name) {
+  if (!confirm(`Delete ${name}?`)) return;
+  try { renderSpeech((await api("DELETE", `/api/speech/models/${encodeURIComponent(name)}`)).speech); toast(`deleted ${name}`); }
+  catch (e) { toast(e.message, true); }
+}
+$("speech-pull-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const name = $("speech-pull-name").value.trim();
+  if (name) pullSpeech(name);
+});
+
+// Dictation: the mic records 16 kHz mono WAV in the page (no converter needed on the
+// machine), sends it to be transcribed, and puts the text into the box.
+let recorder = null;
+async function startRecording(button) {
+  if (!navigator.mediaDevices || !window.isSecureContext) {
+    toast("the browser allows the microphone only on https or on this machine (localhost)", true);
+    return;
+  }
+  let media;
+  try { media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }); }
+  catch (e) { toast("no microphone: " + e.message, true); return; }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = ctx.createMediaStreamSource(media);
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  node.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  source.connect(node);
+  node.connect(ctx.destination);
+  recorder = { button, media, ctx, node, source, chunks, rate: ctx.sampleRate };
+  button.classList.add("recording");
+  button.title = "recording: press again to stop";
+}
+function wavFrom(chunks, rate, target = 16000) {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const all = new Float32Array(total);
+  let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.length; }
+  const ratio = rate / target, n = Math.floor(total / ratio);
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVEfmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, target, true); v.setUint32(28, target * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {              // average the samples each output sample covers
+    const a = Math.floor(i * ratio), b = Math.min(total, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    for (let j = a; j < b; j++) sum += all[j];
+    const x = Math.max(-1, Math.min(1, b > a ? sum / (b - a) : 0));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+async function stopRecording() {
+  const r = recorder;
+  recorder = null;
+  r.node.disconnect(); r.source.disconnect();
+  for (const t of r.media.getTracks()) t.stop();
+  r.ctx.close();
+  r.button.classList.remove("recording");
+  r.button.classList.add("working");
+  r.button.title = "transcribing…";
+  try {
+    const res = await fetch("/api/speech/transcribe", { method: "POST", headers: { "Content-Type": "application/octet-stream" },
+                                                         body: wavFrom(r.chunks, r.rate) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    const box = $(r.button.dataset.for);
+    if (data.text) {
+      box.value = (box.value.trim() ? box.value.replace(/\s*$/, " ") : "") + data.text;
+      box.focus();
+      box.dispatchEvent(new Event("input"));
+    } else toast("no speech heard");
+  } catch (e) { toast("transcription failed: " + e.message, true); }
+  r.button.classList.remove("working");
+  r.button.title = "speak instead of typing: press, talk, press again";
+}
+for (const b of document.querySelectorAll("button.mic")) {
+  b.addEventListener("click", () => {
+    if (recorder && recorder.button === b) stopRecording();
+    else if (!recorder && !b.classList.contains("working")) startRecording(b);
+  });
+}
+
+// Reading answers aloud
+let speaking = null;
+async function speakText(text, button) {
+  if (speaking) { speaking.pause(); speaking = null; if (button) button.textContent = "speak"; return; }
+  if (button) button.textContent = "…";
+  try {
+    const r = await api("POST", "/api/speech/speak", { text });
+    speaking = new Audio(`data:${r.type};base64,${r.audio}`);
+    if (button) button.textContent = "stop";
+    speaking.onended = () => { speaking = null; if (button) button.textContent = "speak"; };
+    await speaking.play();
+  } catch (e) { toast(e.message, true); speaking = null; if (button) button.textContent = "speak"; }
+}
+api("GET", "/api/speech").then((st) => { speechState = st; for (const b of document.querySelectorAll("button.mic")) b.hidden = st.settings.stt === "none"; })
+  .catch(() => {});
 async function useModel(name) {
   setBusy("switching models");
   try { const r = await api("POST", "/api/model", { target: name }); r.done.forEach((d) => toast(d)); renderState(r.state); loadModels(); }
@@ -1419,7 +1715,26 @@ async function loadTools() {
   } catch (e) { toast(e.message, true); }
 }
 subTabs("settings-tabs", "spane-", "sh-spane");
-loaders.settings = () => { refreshState(); loadSettings(); loadTools(); };
+async function loadKeys() {
+  try {
+    const r = await api("GET", "/api/keys");
+    $("keys-file").textContent = r.file;
+    $("key-rows").replaceChildren(...r.keys.map((k) => {
+      const input = el("input", { type: "password", placeholder: k.set ? `set (${k.masked}) · type to replace` : "not set",
+                                  autocomplete: "off", spellcheck: "false" });
+      const save = async (value) => {
+        try { await api("PUT", `/api/keys/${k.name}`, { value }); toast(value ? `${k.name} key saved` : `${k.name} key removed`); loadKeys(); }
+        catch (e) { toast(e.message, true); }
+      };
+      return el("tr", {},
+        el("td", {}, el("strong", { text: k.name }), el("br"), el("span", { class: "muted", text: k.about })),
+        el("td", {}, input, k.from && k.from.startsWith("$") ? el("div", { class: "muted", text: `from ${k.from}` }) : null),
+        el("td", {}, el("button", { class: "small", text: "Save", onclick: () => input.value.trim() && save(input.value.trim()) }),
+          k.set && !k.from.startsWith("$") ? el("button", { class: "small link", text: "remove", onclick: () => save("") }) : null));
+    }));
+  } catch (e) { toast(e.message, true); }
+}
+loaders.settings = () => { refreshState(); loadSettings(); loadTools(); loadKeys(); };
 $("config-filter").addEventListener("input", () => { clearTimeout(filterTimer); filterTimer = setTimeout(loadSettings, 200); });
 $("config-changed").addEventListener("change", loadSettings);
 $("config-save").addEventListener("click", async () => {
@@ -1440,6 +1755,6 @@ $("config-save").addEventListener("click", async () => {
 // ================================================================== start
 refreshState();
 loadRelics();
-show(["chat", "research", "notes", "planner", "relics", "models", "settings"].includes(recall("sh-view", "")) ? recall("sh-view", "") : "chat");
+show(["chat", "research", "notes", "code", "relics", "models", "settings"].includes(recall("sh-view", "")) ? recall("sh-view", "") : "chat");
 showPane(recall("sh-pane", "") === "bibliography" ? "bibliography" : "ask");
 setInterval(() => { if (!document.hidden && !running) refreshState(); }, 5000);

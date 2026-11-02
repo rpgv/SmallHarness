@@ -84,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="smallharness",
         description="Small local models (LiteRT-LM, or Ollama), used through three modes: chat, research "
-                    "and planner. Without a command, choose a mode.")
+                    "and code. Without a command, choose a mode.")
     p.add_argument("-m", "--model", help="a model file, a name from `smallharness models`, or (ollama) a model name")
     p.add_argument("-b", "--backend", choices=["litert", "ollama", "mock"])
     p.add_argument("-w", "--workspace", default=".", help="project directory (default: current)")
@@ -103,13 +103,15 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("question", nargs="+")
     ix = sub.add_parser("index", help="add files or folders to the knowledge base")
     ix.add_argument("paths", nargs="+")
-    pl = sub.add_parser("plan", help="the planner (with a goal: plan it, and optionally expand and run it)")
+    pl = sub.add_parser("code", aliases=["plan"], help="Code mode: plan code changes (with a goal: plan it, and optionally expand and run it)")
     pl.add_argument("goal", nargs="*")
     pl.add_argument("--expand", type=int, default=0, metavar="N", help="expand every step N passes")
     pl.add_argument("--run", choices=["fresh", "continuous"])
     pl.add_argument("--parallel", action="store_true", help="expand steps and run independent tasks in parallel")
     pl.add_argument("--checks", action="store_true", help="let expansion propose checks for each step")
     pl.add_argument("--persist", metavar="N", help="retries per failed step, 0-10 or max (until it succeeds or is stopped)")
+    pl.add_argument("--permissions", choices=["ask", "write", "all"],
+                    help="what runs without asking: nothing (ask), file writes (write), file writes and commands (all)")
     wb = sub.add_parser("web", help="open the visual interface in a browser (local web server)")
     wb.add_argument("--host", default="127.0.0.1", help="address to listen on (default: this machine only)")
     wb.add_argument("--port", type=int, default=8765, help="port (0: any free port)")
@@ -118,11 +120,27 @@ def build_parser() -> argparse.ArgumentParser:
                     help="load the model before the page opens, instead of on first use")
     nt = sub.add_parser("notes", help="note mode: take notes without loading a model")
     nt.add_argument("text", nargs="*", help="save this as a note and exit, instead of opening note mode")
+    st = sub.add_parser("stt", help="speech to text: print what a recording says (Whisper or Vosk)")
+    st.add_argument("audio", help="a WAV file (Whisper also reads other formats)")
+    st.add_argument("--engine", choices=["whisper", "vosk"], help="default: [speech].stt")
+    st.add_argument("--model", help="a pulled model, e.g. base or vosk-model-small-en-us-0.15")
+    st.add_argument("--language", help="Whisper: the language, e.g. en (default: detect)")
+    ts = sub.add_parser("tts", help="text to speech: write a WAV file (Piper or Bark)")
+    ts.add_argument("text", nargs="*", help="what to say (default: read from standard input)")
+    ts.add_argument("-o", "--output", default="speech.wav", help="the WAV file to write (default: speech.wav)")
+    ts.add_argument("--engine", choices=["piper", "bark"], help="default: [speech].tts")
+    ts.add_argument("--voice", help="a pulled Piper voice, or a Bark speaker")
+    ts.add_argument("--play", action="store_true", help="also play it (aplay, paplay, afplay or ffplay)")
+    sub.add_parser("speech", help="speech engines and models: what is installed and pulled")
+    ky = sub.add_parser("key", help="save an API key (gemini: /gemini; ncbi: PubMed), outside any project")
+    ky.add_argument("name", nargs="?", choices=["gemini", "ncbi"], help="without a name: which keys are set")
+    ky.add_argument("--remove", action="store_true", help="forget the saved key")
     ck = sub.add_parser("check", help="report RAM and how many model instances fit")
     ck.add_argument("--probe", action="store_true", help="also send one test prompt and show the raw result")
     sub.add_parser("models", help="list downloaded models, and ones available to pull (with -b ollama: Ollama's)")
     pu = sub.add_parser("pull", help="download a model into the model folder (with -b ollama: into Ollama)")
-    pu.add_argument("name", help="a name from `smallharness models`, hf:OWNER/REPO/FILE, or a Hugging Face file URL")
+    pu.add_argument("name", help="a name from `smallharness models`, hf:OWNER/REPO/FILE, a Hugging Face file URL, "
+                                 "or a speech model (whisper:base, vosk:NAME, piper:VOICE, bark)")
     pu.add_argument("--force", action="store_true", help="download again even if the file is there")
     pu.add_argument("-y", "--yes", action="store_true", help="download even if it will not fit in RAM")
     de = sub.add_parser("delete", help="delete a downloaded model from the model folder (with -b ollama: from Ollama)")
@@ -133,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 MODES = {"chat": ("talk with the model; tools and other modes only on command", "ChatShell"),
          "research": ("ask questions of your files and notes, with references", "ResearchShell"),
-         "planner": ("plan code changes, expand the steps, run them", "PlannerShell")}
+         "code": ("plan code changes, expand the steps, run them", "CodeShell")}
 
 
 def choose_mode() -> str | None:
@@ -160,9 +178,9 @@ def choose_mode() -> str | None:
 
 def run_modes(h: Harness, events, first: str | None, no_color: bool) -> int:
     """The chosen mode, then the menu again after /mode, until /exit."""
-    from . import chat_mode, planner_mode, research_mode
+    from . import chat_mode, code_mode, research_mode
     classes = {"chat": chat_mode.ChatShell, "research": research_mode.ResearchShell,
-               "planner": planner_mode.PlannerShell}
+               "code": code_mode.CodeShell}
     setup_readline(h.cfg.state.history)
     mode = first or choose_mode()
     while mode:
@@ -250,8 +268,38 @@ def _exit_on_signal(signum, _frame) -> None:
     raise SystemExit(128 + signum)
 
 
+def run_key(name: str | None, remove: bool) -> int:
+    """`smallharness key [NAME]`: save a key (asked without echo), or show which are set."""
+    import getpass
+
+    from .. import keys
+    if not name:
+        for k in keys.status():
+            state = ui.ok(f"set {k['masked']}") + ui.dim(f"  from {k['from']}") if k["set"] else ui.dim("not set")
+            print(f"  {ui.bold(k['name'].ljust(7))} {state}\n          {ui.dim(k['about'])}")
+        print(ui.dim(f"  keys file: {keys.keys_file()}"))
+        return 0
+    if remove:
+        keys.put(name, "")
+        print(ui.ok(f"  ✓ {name} key removed from {keys.keys_file()}"))
+        return 0
+    try:
+        value = getpass.getpass(f"{name} API key (not shown): ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 1
+    if not value.strip():
+        print(ui.err("  no key given; nothing changed"))
+        return 1
+    keys.put(name, value)
+    print(ui.ok(f"  ✓ saved in {keys.keys_file()} (readable by you only)"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.cmd == "key":
+        return run_key(args.name, args.remove)
     overrides: dict = {"model": {}, "ui": {}}
     if args.model:
         overrides["model"]["path"] = args.model
@@ -264,9 +312,21 @@ def main(argv: list[str] | None = None) -> int:
     ui.set_color(cfg["ui"]["color"] and not args.no_color)
     if args.cmd == "notes":
         return run_notes(cfg, " ".join(args.text))
+    if args.cmd in ("stt", "tts", "speech"):
+        from .speech_cmds import run_speech
+        return run_speech(cfg, args)
     if args.cmd == "models":
         print_models(cfg)
+        from .speech_cmds import print_speech_models
+        print_speech_models(cfg, brief=True)
         return 0
+    from .. import speech
+    if args.cmd == "pull" and speech.parse(args.name):
+        from .speech_cmds import pull_speech
+        return 0 if pull_speech(cfg, args.name, force=args.force) else 1
+    if args.cmd == "delete" and speech.parse(args.name):
+        from .speech_cmds import delete_speech
+        return 0 if delete_speech(cfg, args.name, assume_yes=args.yes) else 1
     if args.cmd == "pull":
         name = pull_model(cfg, args.name, force=args.force, assume_yes=args.yes)
         if name:
@@ -275,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if name else 1
     if args.cmd == "delete":
         return 0 if delete_model(cfg, args.name, assume_yes=args.yes) else 1
-    interactive = args.cmd in (None, "chat", "research", "plan", "web")
+    interactive = args.cmd in (None, "chat", "research", "code", "plan", "web")
     confirm_trust(cfg, interactive and sys.stdin.isatty())
     for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
         if sig is not None:
@@ -338,16 +398,18 @@ def _run(h: Harness, cfg: Config, args, events: Events) -> int:
         shell.ask(" ".join(args.question))
         print(ui.dim(f"  references: {shell.r.bibliography_path}"))
         return 0
-    if args.cmd == "plan" and args.goal:
-        from .planner_mode import PlannerShell
-        shell = PlannerShell(h, events, args.no_color)
+    if args.cmd in ("code", "plan") and args.goal:
+        from .code_mode import CodeShell
+        shell = CodeShell(h, events, args.no_color)
         shell.text(" ".join(args.goal))
         if args.persist:
             shell.cmd_persist(args.persist)
+        if args.permissions:
+            shell.cmd_permissions(args.permissions)
         if args.expand:
             shell.cmd_expand(f"times={args.expand}" + (" checks" if args.checks else ""))
         if args.run:
             shell.cmd_run(args.run + (" parallel" if args.parallel else ""))
         return 0
-    first = {"chat": "chat", "research": "research", "plan": "planner"}.get(args.cmd)
+    first = {"chat": "chat", "research": "research", "code": "code", "plan": "code"}.get(args.cmd)
     return run_modes(h, events, first, args.no_color)

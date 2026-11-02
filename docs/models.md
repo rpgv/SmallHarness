@@ -68,7 +68,7 @@ size × `overhead_factor`, plus the KV cache for the context size (exact from th
 file when it can be read; estimated otherwise). It refuses to start a model that does
 not fit. Code: `resources.py`, `pool.py`.
 
-- The planner (expanding, `parallel` runs) starts more model
+- Code mode (expanding, `parallel` runs) starts more model
   instances when there is more than one thing to do, as many as fit. `/resources` (or
   Settings on the web) shows how many fit.
 - To turn this off, set `[resources].manage_ram = false`. The harness then runs exactly

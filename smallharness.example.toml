@@ -72,6 +72,7 @@ extra_dirs = []                  # more folders of drop-in tools
 default_mode = "fresh"           # fresh | continuous
 parallel = false                 # run independent tasks on several instances
 persistence = 2                  # new plans: retries per failed task, 0-10 (10: until it succeeds or is stopped)
+permissions = "ask"              # new plans: ask | write (files without asking) | all (files and commands)
 
 
 [rag]                            # what /index accepts, in single files and whole folders

@@ -80,6 +80,34 @@ DEFAULTS: dict[str, Any] = {
         "default_mode": "fresh",      # fresh | continuous
         "parallel": False,            # run independent tasks on several instances
         "persistence": 2,             # new plans: retries per failed task, 0-10 (10: until it succeeds or is stopped)
+        "permissions": "ask",         # new plans: ask | write (files without asking) | all (files and commands)
+    },
+    "speech": {
+        # Speech to text and text to speech, on this machine. Engines are optional packages
+        # (pip install faster-whisper | vosk | piper-tts | suno-bark); models are pulled with
+        # `smallharness pull whisper:base`, `vosk:NAME`, `piper:VOICE` or `bark`.
+        "stt": "whisper",             # whisper | vosk | none
+        "whisper_model": "base",      # tiny | base | small | medium | large-v3 | distil-large-v3, or a folder
+        "vosk_model": "vosk-model-small-en-us-0.15",   # a pulled Vosk model, or a folder
+        "language": "",               # Whisper: "" detects it; or "en", "pt", …
+        "tts": "piper",               # piper | bark | none
+        "piper_voice": "en_US-lessac-medium",          # a pulled Piper voice, or an .onnx file
+        "bark_voice": "v2/en_speaker_6",               # a Bark speaker preset
+        "bark_small": True,           # Bark's smaller models: faster, less RAM
+        "device": "cpu",              # Whisper: cpu | cuda | auto
+    },
+    "gemini": {
+        # /gemini: ask a larger model than the local one. The key is not a setting:
+        # GEMINI_API_KEY, or `smallharness key gemini` (kept in ~/.config/smallharness/keys.toml).
+        "model": "gemini-flash-latest",
+        "fallback": ["gemini-3.5-flash", "gemini-flash-lite-latest"],   # tried when the model is busy or out of quota
+        "search": False,              # ground answers in Google Search: needs billing on the key's project
+        "timeout": 60,
+    },
+    "pubmed": {
+        # /pubmed, /doi: NCBI E-utilities. An NCBI key (NCBI_API_KEY, or `smallharness key ncbi`) is optional.
+        "max_results": 10,
+        "timeout": 30,
     },
     "research": {
         "k": 6,                       # excerpts found per question
