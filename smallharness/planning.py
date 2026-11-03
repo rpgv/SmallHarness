@@ -14,7 +14,10 @@ detailed pass by pass, and carried out task by task.
 - Persistence: how many times a failed task is tried again (PERSISTENCE_MAX: until it
   succeeds or the run is stopped). Every retry starts from a clean context holding the
   task and the previous attempt's failure, nothing more. A tool the user refuses ends
-  the retries."""
+  the retries.
+- Permissions: "ask" asks before every risky tool call; "write" runs tools that only
+  write workspace files without asking but still asks before commands; "all" asks
+  for nothing."""
 from __future__ import annotations
 
 import re
@@ -23,11 +26,11 @@ from . import prompts
 from .agent import Agent, Events, ForwardingEvents, Harness
 from .context import RagStore, Session
 from .errors import Invalid
-from .plans import PERSISTENCE_MAX, Check, Plan, PlanStore, Task, parse_check, parse_hand_tasks, parse_plan, plan_text
+from .plans import PERMISSIONS, PERSISTENCE_MAX, Check, Plan, PlanStore, Task, parse_check, parse_hand_tasks, parse_plan, plan_text
 from .steps import back_to_pending
 from .tools import ToolOutcome
 
-__all__ = ["PERSISTENCE_MAX", "Check", "Plan", "PlanStore", "Task", "parse_plan", "plan_text", "create_plan", "draft_plan", "edit_plan",
+__all__ = ["PERMISSIONS", "PERSISTENCE_MAX", "Check", "Plan", "PlanStore", "Task", "parse_plan", "plan_text", "create_plan", "draft_plan", "edit_plan",
            "expand", "PlanRunner"]
 
 _RESULT = re.compile(r"^\s*(DONE|FAILED)\s*:\s*(.*)$", re.I | re.M)
@@ -48,8 +51,23 @@ def create_plan(h: Harness, goal: str, max_tasks: int = 8) -> tuple[Plan, list[s
     if not tasks:
         raise Invalid("the model did not produce a plan in the required format:\n" + text[:500])
     plan = h.plans.add(Plan(goal, tasks[:max_tasks], mode=h.cfg["plan"]["default_mode"],
-                            persistence=default_persistence(h)))
+                            persistence=default_persistence(h), permissions=default_permissions(h)))
     return plan, warnings
+
+
+def default_permissions(h: Harness) -> str:
+    try:
+        return clamp_permissions(h.cfg["plan"].get("permissions", "ask"))
+    except Invalid:
+        return "ask"
+
+
+def clamp_permissions(value) -> str:
+    """A permission mode, also by its label's first word: allow-writing -> write."""
+    v = str(value or "").strip().lower().replace("allow ", "").replace("allow-", "").replace("writing", "write")
+    if v not in PERMISSIONS:
+        raise Invalid(f"permissions is one of: {', '.join(PERMISSIONS)}")
+    return v
 
 
 def default_persistence(h: Harness) -> int:
@@ -67,7 +85,7 @@ def draft_plan(h: Harness, goal: str, text: str) -> tuple[Plan, list[str]]:
     """A plan written by hand (with details, if any): no model call."""
     tasks, warnings = parse_hand_tasks(text, set(h.tools.tools))
     plan = h.plans.add(Plan(goal.strip() or "(no goal)", tasks, mode=h.cfg["plan"]["default_mode"],
-                            persistence=default_persistence(h)))
+                            persistence=default_persistence(h), permissions=default_permissions(h)))
     return plan, warnings
 
 
@@ -148,10 +166,11 @@ class PlanRunner:
     results). mode="continuous": one context carries across all tasks; the context
     manager refreshes it as it fills. With `parallel` (fresh only), independent tasks
     run at the same time on as many instances as RAM allows. `persistence` (default:
-    the plan's) is how many times a failed task is tried again."""
+    the plan's) is how many times a failed task is tried again; `permissions` (default:
+    the plan's) what runs without asking."""
 
     def __init__(self, h: Harness, plan: Plan, mode: str = "fresh", events: Events | None = None,
-                 parallel: bool | None = None, persistence: int | None = None):
+                 parallel: bool | None = None, persistence: int | None = None, permissions: str | None = None):
         if mode not in ("fresh", "continuous"):
             raise ValueError("mode must be 'fresh' or 'continuous'")
         self.h, self.plan, self.mode = h, plan, mode
@@ -162,6 +181,8 @@ class PlanRunner:
         plan.mode = mode
         if persistence is not None:
             plan.persistence = clamp_persistence(persistence)
+        if permissions is not None:
+            plan.permissions = clamp_permissions(permissions)
 
     def _context(self, fresh: bool = False):
         """A context of its own, with no search results: runs see only what the plan gives."""
@@ -190,7 +211,7 @@ class PlanRunner:
     def run_task(self, t: Task, events: Events | None = None) -> Task:
         """The task, then its checks; while either fails and persistence allows, again,
         each time from a clean context that holds only the task and what went wrong."""
-        watch = _Watch(events or self.events)
+        watch = _Watch(_Permissions(events or self.events, self.plan))
         feedback, t.attempts = "", 0
         for c in t.checks:
             c.status, c.result = "pending", ""
@@ -300,6 +321,22 @@ class _Watch(ForwardingEvents):
         if outcome.denied:
             self.denied = outcome.name
         self.inner.on_tool_result(outcome)
+
+
+class _Permissions(ForwardingEvents):
+    """Allows risky tool calls without asking, as the plan's permission mode says. The
+    mode is read at each call, so changing it during a run applies from the next call."""
+
+    def __init__(self, inner: Events, plan: Plan):
+        super().__init__(inner)
+        self.plan = plan
+
+    def permit(self, tool, args: dict) -> bool:
+        mode = self.plan.permissions
+        if mode == "all" or (mode == "write" and tool.effect == "write"):
+            self.inner.on_notice(f"{tool.name} allowed without asking ({PERMISSIONS[mode].split(':')[0]})")
+            return True
+        return self.inner.permit(tool, args)
 
 
 def _quiet(events: Events) -> Events:

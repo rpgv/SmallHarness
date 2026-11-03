@@ -1,4 +1,4 @@
-"""The visual interface's server (chat, research, notes, planner, relics), against the mock model."""
+"""The visual interface's server (chat, research, notes, code, relics), against the mock model."""
 import io
 import json
 import tempfile
@@ -65,12 +65,12 @@ class Web(unittest.TestCase):
         status, page = self.req("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("SmallHarness", page)
-        for tab in ("Chat", "Research", "Planner"):
+        for tab in ("Chat", "Research", "Code"):
             self.assertIn(f">{tab}</button>", page)
         self.assertEqual(self.req("GET", "/app.js")[0], 200)
         self.assertIn("[hidden] { display: none !important; }", self.req("GET", "/app.css")[1])
         self.assertEqual(self.req("GET", "/../server.py")[0], 404)
-        self.assertEqual(self.req("GET", "/api/state")[1]["version"], "1.0.0")     # no key needed
+        self.assertEqual(self.req("GET", "/api/state")[1]["version"], __import__("smallharness").__version__)     # no key needed
         self.assertEqual(self.req("GET", "/api/state", headers={"Host": "evil.example:80"})[0], 403)  # rebinding
         other = {"Origin": "http://evil.example"}
         self.assertEqual(self.req("POST", "/api/notes", {"text": "x"}, headers=other)[0], 403)   # another site
@@ -125,58 +125,104 @@ class Web(unittest.TestCase):
         self.assertEqual(self.req("POST", "/api/research/upload?name=x.md", raw=b"text",
                                   headers={"Content-Type": "application/json"})[0], 403)    # must be binary
 
+    # ---------------------------------------------------------------- speech
+    def test_speech_routes(self):
+        import base64
+
+        from smallharness import speech
+        status, st = self.req("GET", "/api/speech")
+        self.assertEqual((status, st["settings"]["stt"]), (200, "whisper"))
+        self.assertIn("piper", st["engines"])
+        with mock.patch.object(speech, "transcribe", return_value={"text": "hi there", "engine": "vosk", "model": "m",
+                                                                    "seconds": 0.1}) as t:
+            status, r = self.req("POST", "/api/speech/transcribe?language=pt", raw=b"RIFFaudio",
+                                 headers={"Content-Type": "application/octet-stream"})
+        self.assertEqual((status, r["text"]), (200, "hi there"))
+        self.assertEqual((t.call_args.args[1], t.call_args.args[4]), (b"RIFFaudio", "pt"))
+        with mock.patch.object(speech, "speak", return_value={"audio": b"RIFFwav", "engine": "piper", "voice": "v",
+                                                               "seconds": 0.1}):
+            status, r = self.req("POST", "/api/speech/speak", {"text": "hello"})
+        self.assertEqual((status, base64.b64decode(r["audio"]), r["type"]), (200, b"RIFFwav", "audio/wav"))
+        with mock.patch.object(speech, "installed", lambda e: False):
+            self.assertEqual(self.req("POST", "/api/speech/speak", {"text": "hello"})[0], 400)   # says pip install
+        self.assertEqual(self.req("POST", "/api/speech/pull", {"name": "gemma3:1b"})[0], 400)
+        self.assertEqual(self.req("DELETE", "/api/speech/models/whisper%3Abase")[0], 404)
+        status, r = self.req("POST", "/api/config", {"values": {"speech.stt": "vosk"}})
+        self.assertEqual((status, self.req("GET", "/api/speech")[1]["settings"]["stt"]), (200, "vosk"))
+
+    # ------------------------------------------------------- keys and sources
+    def test_keys_and_gemini_without_a_key(self):
+        import os
+        env = {"SMALLHARNESS_KEYS_FILE": str(self.ws / "home" / "keys.toml"), "GEMINI_API_KEY": "", "GOOGLE_API_KEY": "",
+               "NCBI_API_KEY": ""}
+        with mock.patch.dict(os.environ, env):
+            status, r = self.req("GET", "/api/keys")
+            self.assertEqual((status, [k["set"] for k in r["keys"]]), (200, [False, False]))
+            self.assertEqual(self.req("POST", "/api/research/gemini", {"question": "x"})[0], 400)   # no key: says how
+            _, r = self.req("PUT", "/api/keys/gemini", {"value": "AIzaVERYSECRET99"})
+            self.assertEqual(r["keys"][0]["masked"], "…ET99")
+            self.assertNotIn("VERYSECRET", json.dumps(self.req("GET", "/api/keys")[1]))
+            self.assertEqual(self.req("PUT", "/api/keys/openai", {"value": "x"})[0], 422)
+            self.assertEqual(self.req("POST", "/api/research/answers/9/save", {})[0], 404)
+            self.assertEqual(self.req("POST", "/api/research/doi", {"ids": "not-an-id"})[0], 200)  # a stream: the error is an event
+
     # ------------------------------------------------------------- planner
     def test_planner(self):
-        status, plan = self.req("POST", "/api/plans", {"goal": "inventory"})
+        status, plan = self.req("POST", "/api/code", {"goal": "inventory"})
         self.assertEqual(status, 200, plan)
         self.assertEqual(len(plan["tasks"]), 2)
-        _, events = self.req("POST", f"/api/plans/{plan['id']}/expand", {"times": 2, "parallel": False})
+        _, events = self.req("POST", f"/api/code/{plan['id']}/expand", {"times": 2, "parallel": False})
         self.assertEqual(sum(e["type"] == "step" for e in events), 4)
         tasks = events[-1]["plan"]["tasks"]
         self.assertEqual([t["depth"] for t in tasks], [2, 2])
         self.assertIn("Use the suggested tool", tasks[0]["detail"])
         self.assertIn("   Use the suggested tool", events[-1]["plan"]["text"])           # details, indented
-        _, events = self.req("POST", f"/api/plans/{plan['id']}/run", {"mode": "fresh"})
+        _, events = self.req("POST", f"/api/code/{plan['id']}/run", {"mode": "fresh"})
         self.assertEqual(events[-1]["type"], "done")
-        self.assertEqual([t["status"] for t in self.req("GET", f"/api/plans/{plan['id']}")[1]["tasks"]], ["done", "done"])
-        self.assertEqual(self.req("POST", f"/api/plans/{plan['id']}/run", {"mode": "heartbeat"})[0], 400)
-        self.assertEqual(self.req("POST", f"/api/plans/{plan['id']}/expand", {"steps": "all"})[0], 400)
+        self.assertEqual([t["status"] for t in self.req("GET", f"/api/code/{plan['id']}")[1]["tasks"]], ["done", "done"])
+        self.assertEqual(self.req("POST", f"/api/code/{plan['id']}/run", {"mode": "heartbeat"})[0], 400)
+        self.assertEqual(self.req("POST", f"/api/code/{plan['id']}/expand", {"steps": "all"})[0], 400)
 
     def test_plans_drafted_and_edited_by_hand(self):
-        status, plan = self.req("POST", "/api/plans", {"goal": "by hand",
+        status, plan = self.req("POST", "/api/code", {"goal": "by hand",
                                                        "text": "[safe_list_files] List\n   only docs/\n[none] Report (after: 1)"})
         self.assertEqual(status, 200, plan)
         self.assertEqual(plan["tasks"][0]["detail"], "only docs/")
         self.assertFalse(self.req("GET", "/api/state")[1]["model"]["loaded"])          # no model needed
-        status, edited = self.req("PUT", f"/api/plans/{plan['id']}", {"text": plan["text"] + "\n3. [none] Done"})
+        status, edited = self.req("PUT", f"/api/code/{plan['id']}", {"text": plan["text"] + "\n3. [none] Done"})
         self.assertEqual((status, edited["goal"], len(edited["tasks"])), (200, "by hand", 3))
-        self.assertEqual(self.req("PUT", "/api/plans/nope", {"text": "1. x"})[0], 404)
+        self.assertEqual(self.req("PUT", "/api/code/nope", {"text": "1. x"})[0], 404)
 
     def test_persistence_and_checks(self):
         text = "1. [none] Write it\n   check: [none] it has text\n2. [none] Report (after: 1)"
-        _, plan = self.req("POST", "/api/plans", {"goal": "g", "text": text})
+        _, plan = self.req("POST", "/api/code", {"goal": "g", "text": text})
         self.assertEqual((plan["persistence"], plan["persistence_max"]), (2, 10))   # [plan].persistence
         self.assertEqual(plan["tasks"][0]["checks"], [{"task": "it has text", "tool": "none", "status": "pending", "result": ""}])
         self.assertEqual(plan["text"], text)
-        _, plan = self.req("PUT", f"/api/plans/{plan['id']}/persistence", {"persistence": 3})
+        _, plan = self.req("PUT", f"/api/code/{plan['id']}/persistence", {"persistence": 3})
         self.assertEqual(plan["persistence"], 3)
-        self.assertEqual(self.req("PUT", f"/api/plans/{plan['id']}/persistence", {"persistence": "lots"})[0], 422)
+        self.assertEqual(self.req("PUT", f"/api/code/{plan['id']}/persistence", {"persistence": "lots"})[0], 422)
+        self.assertEqual(plan["permissions"], "ask")
+        _, p2 = self.req("PUT", f"/api/code/{plan['id']}/permissions", {"permissions": "write"})
+        self.assertEqual(p2["permissions"], "write")
+        self.assertEqual(self.req("PUT", f"/api/code/{plan['id']}/permissions", {"permissions": "yolo"})[0], 422)
+        self.assertEqual(self.req("POST", f"/api/code/{plan['id']}/run", {"permissions": "yolo"})[0], 422)
         self.backend.script.extend(["DONE: wrote it", "FAILED: it is empty", "DONE: wrote it again", "DONE: it has text",
                                     "DONE: reported"])
-        _, events = self.req("POST", f"/api/plans/{plan['id']}/run", {"mode": "fresh"})
+        _, events = self.req("POST", f"/api/code/{plan['id']}/run", {"mode": "fresh"})
         t1 = events[-1]["plan"]["tasks"][0]
         self.assertEqual((t1["status"], t1["attempts"], t1["checks"][0]["status"]), ("done", 2, "done"))
         self.assertTrue(any(e["type"] == "notice" and "attempt 2 of 4" in e["text"] for e in events))
-        _, events = self.req("POST", f"/api/plans/{plan['id']}/expand", {"steps": [2], "checks": True})
+        _, events = self.req("POST", f"/api/code/{plan['id']}/expand", {"steps": [2], "checks": True})
         self.assertEqual(len(events[-1]["plan"]["tasks"][1]["checks"]), 1)
 
     def test_risky_tool_asks_the_page(self):
-        _, plan = self.req("POST", "/api/plans", {"goal": "write", "text": "[risky_write_file] Write x.txt"})
+        _, plan = self.req("POST", "/api/code", {"goal": "write", "text": "[risky_write_file] Write x.txt"})
         self.backend.script.extend(['<tool>{"name": "risky_write_file", "args": {"path": "x.txt", "content": "hi"}}</tool>',
                                     "DONE: wrote it"])
         out = {}
         t = threading.Thread(target=lambda: out.update(
-            events=self.req("POST", f"/api/plans/{plan['id']}/run", {"mode": "fresh"})[1]))
+            events=self.req("POST", f"/api/code/{plan['id']}/run", {"mode": "fresh"})[1]))
         t.start()
         pid = self.wait_for_permit()
         self.assertFalse((self.ws / "x.txt").exists())                                    # asked before writing
@@ -195,7 +241,7 @@ class Web(unittest.TestCase):
         self.assertEqual([x["path"] for x in self.req("GET", "/api/relics")[1]["relics"]], ["x.txt"])
 
     def test_stop_ends_a_plan_run(self):
-        _, plan = self.req("POST", "/api/plans", {"goal": "g", "text": "[none] First\n[none] Second"})
+        _, plan = self.req("POST", "/api/code", {"goal": "g", "text": "[none] First\n[none] Second"})
 
         def slow(prompt, max_tokens, stop=None):           # a long answer, streamed
             for _ in range(100):
@@ -204,19 +250,19 @@ class Web(unittest.TestCase):
         self.backend.stream = slow
         out = {}
         t = threading.Thread(target=lambda: out.update(
-            events=self.req("POST", f"/api/plans/{plan['id']}/run", {"mode": "fresh"})[1]))
+            events=self.req("POST", f"/api/code/{plan['id']}/run", {"mode": "fresh"})[1]))
         t.start()
         time.sleep(0.5)
         self.assertEqual(self.req("POST", "/api/stop", {})[0], 200)
         t.join(20)
         self.assertEqual(out["events"][-1]["type"], "stopped")
-        _, detail = self.req("GET", f"/api/plans/{plan['id']}")
+        _, detail = self.req("GET", f"/api/code/{plan['id']}")
         self.assertEqual([t["status"] for t in detail["tasks"]], ["pending", "pending"])
         self.assertFalse(self.app.busy.locked())
 
     def test_a_run_outlives_the_page(self):
         """A plan run goes on when the page goes away, and any page can follow it again."""
-        _, plan = self.req("POST", "/api/plans", {"goal": "g", "text": "[none] First\n[none] Second"})
+        _, plan = self.req("POST", "/api/code", {"goal": "g", "text": "[none] First\n[none] Second"})
         asked, release, real = threading.Event(), threading.Event(), self.backend.generate
 
         def held(prompt, max_tokens, stop=None):
@@ -224,7 +270,7 @@ class Web(unittest.TestCase):
             release.wait(10)
             return real(prompt, max_tokens, stop)
         self.backend.generate = held
-        r = urllib.request.Request(self.base + f"/api/plans/{plan['id']}/run", method="POST",
+        r = urllib.request.Request(self.base + f"/api/code/{plan['id']}/run", method="POST",
                                    data=b'{"mode": "fresh"}', headers={"Content-Type": "application/json"})
         res = urllib.request.urlopen(r, timeout=20)
         job = json.loads(res.readline())
@@ -232,9 +278,9 @@ class Web(unittest.TestCase):
         self.assertEqual(job["type"], "job")
         self.assertTrue(asked.wait(10))
         self.assertEqual(self.req("GET", "/api/state")[1]["job"]["id"], job["id"])
-        _, live = self.req("GET", f"/api/plans/{plan['id']}")
+        _, live = self.req("GET", f"/api/code/{plan['id']}")
         self.assertEqual(live["tasks"][0]["status"], "running")                           # live, not as saved
-        self.assertEqual(self.req("PUT", f"/api/plans/{plan['id']}/steps", {"done": True})[0], 409)
+        self.assertEqual(self.req("PUT", f"/api/code/{plan['id']}/steps", {"done": True})[0], 409)
         release.set()
         _, events = self.req("GET", f"/api/jobs/{job['id']}/events")                      # follows to the end
         self.assertEqual((events[0]["type"], events[-1]["type"]), ("job", "done"))
@@ -247,26 +293,26 @@ class Web(unittest.TestCase):
         self.assertFalse(self.app.busy.locked())
 
     def test_plan_steps_ticked_and_plans_deleted(self):
-        _, plan = self.req("POST", "/api/plans", {"goal": "g", "text": "[none] First\n[none] Second (after: 1)"})
+        _, plan = self.req("POST", "/api/code", {"goal": "g", "text": "[none] First\n[none] Second (after: 1)"})
         pid = plan["id"]
-        _, p = self.req("PUT", f"/api/plans/{pid}/steps", {"steps": [1], "done": True})
+        _, p = self.req("PUT", f"/api/code/{pid}/steps", {"steps": [1], "done": True})
         self.assertEqual([t["status"] for t in p["tasks"]], ["done", "pending"])
-        _, p = self.req("PUT", f"/api/plans/{pid}/steps", {"done": True})                  # every step
+        _, p = self.req("PUT", f"/api/code/{pid}/steps", {"done": True})                  # every step
         self.assertTrue(p["finished"])
-        _, p = self.req("PUT", f"/api/plans/{pid}/steps", {"steps": [2], "done": False})   # run it again
+        _, p = self.req("PUT", f"/api/code/{pid}/steps", {"steps": [2], "done": False})   # run it again
         self.assertEqual([t["status"] for t in p["tasks"]], ["done", "pending"])
-        self.assertEqual(self.req("PUT", f"/api/plans/{pid}/steps", {"steps": [9]})[0], 404)
-        self.assertEqual(self.req("PUT", f"/api/plans/{pid}/steps", {"steps": "all"})[0], 400)
-        self.assertEqual(self.req("DELETE", f"/api/plans/{pid}")[0], 200)
-        self.assertEqual(self.req("GET", f"/api/plans/{pid}")[0], 404)
-        self.assertEqual(self.req("GET", "/api/plans")[1]["plans"], [])
-        self.assertEqual(self.req("DELETE", f"/api/plans/{pid}")[0], 404)
+        self.assertEqual(self.req("PUT", f"/api/code/{pid}/steps", {"steps": [9]})[0], 404)
+        self.assertEqual(self.req("PUT", f"/api/code/{pid}/steps", {"steps": "all"})[0], 400)
+        self.assertEqual(self.req("DELETE", f"/api/code/{pid}")[0], 200)
+        self.assertEqual(self.req("GET", f"/api/code/{pid}")[0], 404)
+        self.assertEqual(self.req("GET", "/api/code")[1]["plans"], [])
+        self.assertEqual(self.req("DELETE", f"/api/code/{pid}")[0], 404)
 
     def test_plan_writes_are_relics(self):
-        _, plan = self.req("POST", "/api/plans", {"goal": "write", "text": "[risky_write_file] Write out/x.txt"})
+        _, plan = self.req("POST", "/api/code", {"goal": "write", "text": "[risky_write_file] Write out/x.txt"})
         self.backend.script.extend(['<tool>{"name": "risky_write_file", "args": {"path": "out/x.txt", "content": "hi"}}</tool>',
                                     "DONE: wrote it"])
-        t = threading.Thread(target=lambda: self.req("POST", f"/api/plans/{plan['id']}/run", {"mode": "fresh"}))
+        t = threading.Thread(target=lambda: self.req("POST", f"/api/code/{plan['id']}/run", {"mode": "fresh"}))
         t.start()
         self.req("POST", "/api/permit", {"id": self.wait_for_permit(), "allow": True})
         t.join(20)
@@ -296,6 +342,11 @@ class Web(unittest.TestCase):
         self.assertEqual(events[-1]["chat"]["title"], "/read readme.txt")
         self.assertEqual(self.req("POST", f"/api/chats/{cid}/send", {"text": "/nope"})[0], 422)   # before any job
         self.assertEqual(self.req("POST", f"/api/chats/{cid}/send", {"text": "x", "thread": 99})[0], 404)
+        status, saved = self.req("POST", f"/api/chats/{cid}/export", {"num": added[1]["num"], "path": "out/answer.md"})
+        self.assertEqual((status, saved["path"]), (200, "out/answer.md"))
+        self.assertIn("tangerine", (self.ws / "out/answer.md").read_text())
+        self.assertEqual(self.req("POST", f"/api/chats/{cid}/export", {"num": added[1]["num"], "path": "out/answer.md"})[0], 422)
+        self.assertEqual(self.req("POST", f"/api/chats/{cid}/export", {"num": "one"})[0], 400)
         _, events = self.req("POST", f"/api/chats/{cid}/send", {"text": "more please", "thread": 3})
         self.assertEqual(events[-1]["chat"]["threads"], {"3": 2})
         _, chat = self.req("PUT", f"/api/chats/{cid}/messages/3/pin", {"pinned": True})

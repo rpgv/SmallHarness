@@ -343,6 +343,8 @@ class Pulled:
     already: bool = False          # was already in the folder
     resumed_from: int = 0          # bytes kept from an interrupted download
     verified: bool = False         # SHA-256 checked
+    sha256: str = ""
+    commit: str = ""
 
 
 Progress = Callable[[int, int | None], None]
@@ -353,8 +355,20 @@ def pull(spec: str, mcfg: dict, progress: Progress | None = None, force: bool = 
     """Download a model into the folder. Resumes a `.part` file left by an interrupted run."""
     src, _ = parse_spec(spec)
     d = models_dir(mcfg)[0]
+    got = download(src, d / Path(src.file).name, mcfg, progress, force, remote)
+    if not got.already:
+        _record(d, got.path.name, {"repo": src.repo, "file": src.file, "revision": src.revision,
+                                   "commit": got.commit, "sha256": got.sha256,
+                                   "size": got.size, "pulled": time.strftime("%Y-%m-%d %H:%M:%S")})
+    return got
+
+
+def download(src: Source, dest: Path, mcfg: dict, progress: Progress | None = None, force: bool = False,
+             remote: Remote | None = None) -> Pulled:
+    """One Hugging Face file to `dest`: resumable from `<dest>.part`, checked against the
+    size and SHA-256 Hugging Face publishes, renamed into place only when complete."""
+    d = dest.parent
     d.mkdir(parents=True, exist_ok=True)
-    dest = d / Path(src.file).name
     remote = remote or inspect(src, mcfg)
     if dest.exists() and not force and (remote.size is None or dest.stat().st_size == remote.size):
         return Pulled(dest, dest.stat().st_size, already=True)
@@ -398,7 +412,7 @@ def pull(spec: str, mcfg: dict, progress: Progress | None = None, force: bool = 
     except urllib.error.HTTPError as e:
         if e.code == 416 and have:  # the range is past the end: the .part is stale
             part.unlink()
-            return pull(spec, mcfg, progress, force, remote)
+            return download(src, dest, mcfg, progress, force, remote)
         raise _http_error(e, src, token) from None
     except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
         raise PullError(f"download interrupted ({getattr(e, 'reason', e)}); "
@@ -412,10 +426,8 @@ def pull(spec: str, mcfg: dict, progress: Progress | None = None, force: bool = 
         raise PullError("the download does not match the SHA-256 Hugging Face publishes; it was "
                         "deleted, run the pull again")
     os.replace(part, dest)
-    _record(d, dest.name, {"repo": src.repo, "file": src.file, "revision": src.revision,
-                           "commit": remote.commit, "sha256": remote.sha256 or digest.hexdigest(),
-                           "size": size, "pulled": time.strftime("%Y-%m-%d %H:%M:%S")})
-    return Pulled(dest, size, resumed_from=resumed_from, verified=bool(remote.sha256))
+    return Pulled(dest, size, resumed_from=resumed_from, verified=bool(remote.sha256),
+                  sha256=remote.sha256 or digest.hexdigest(), commit=remote.commit)
 
 
 # ------------------------------------------------------------ server mode

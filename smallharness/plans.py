@@ -22,6 +22,13 @@ _CHECK = re.compile(r"^check\s*:\s*(?:\[([^\]]*)\])?\s*(.+?)\s*$", re.I)
 
 PERSISTENCE_MAX = 10   # the top of the gauge: retry until the task succeeds or the run is stopped
 
+# What a run may do without asking. Safe tools never ask.
+PERMISSIONS = {
+    "ask": "asks before every file write and every command",
+    "write": "allow writing: writes files without asking, still asks before running commands",
+    "all": "allow all: writes files and runs commands without asking",
+}
+
 
 @dataclass
 class Check:
@@ -62,6 +69,7 @@ class Plan:
     id: str = field(default_factory=lambda: time.strftime("%Y%m%d-%H%M%S"))
     mode: str = "fresh"
     persistence: int = 0           # retries per task, 0 to PERSISTENCE_MAX (no limit)
+    permissions: str = "ask"       # a key of PERMISSIONS
 
     def render(self, results: bool = False) -> str:
         out = [f"GOAL: {self.goal}"]

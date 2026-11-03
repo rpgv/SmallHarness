@@ -7,12 +7,12 @@ Plan runs are the only place the model calls tools. Code: `tools/`.
 | `safe_read_file`, `safe_list_files`, `safe_search_files` | 2: runs freely |
 | `risky_run_command`, `risky_write_file` | 1: asks first |
 
-`/tools` in the planner, or **Settings → Tools** on the web, lists the tools loaded
+`/tools` in Code mode, or **Settings → Tools** on the web, lists the tools loaded
 with their arguments.
 
 ## The risk is part of the name
 `risky_*` tools are type 1 and ask for permission before every call, with no "always
-allow" option. `safe_*` tools are type 2 and run without asking. A file with any other
+allow" option, except in Code runs whose [permissions](code.md) allow them. `safe_*` tools are type 2 and run without asking. A file with any other
 name is rejected. The `safe_` file tools only reach paths inside the workspace. Calls
 are parsed leniently, because small models often send malformed JSON; a bad call gets
 back the error and the tool's usage.
@@ -29,3 +29,8 @@ DESCRIPTION = "Count lines, words and characters in a workspace file."
 PARAMS = {"path": {"type": "str", "desc": "file path"}}   # add "default" to make optional
 def run(args, ctx): ...
 ```
+
+A `risky_*` tool can also set `KIND = "write"` if all it does is write files inside
+the workspace, as `risky_write_file` does: Code runs set to *allow writing* then run it
+without asking. Any other risky tool is a `"command"` (the default), which only *allow
+all* runs without asking.

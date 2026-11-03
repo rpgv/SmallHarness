@@ -12,7 +12,7 @@ modes:
 
 - **Research**: ask questions of your files and notes. Answers cite the excerpts they
   rest on, like `[3]`.
-- **Planner**: turn one sentence into a step-by-step plan, refine it, and run it with
+- **Code** (the planner): turn one sentence into a step-by-step plan, refine it, and run it with
   tools.
 
 Each model call holds only what the mode puts in: a research question its excerpts, a
@@ -85,10 +85,10 @@ smallharness index docs/ manual.pdf
 smallharness ask "when does the release train leave?"
 ```
 
-**Planner.** Plan a change, add detail, and run it:
+**Code.** Plan a change, add detail, and run it:
 
 ```sh
-smallharness plan "add a --verbose flag" --expand 2 --run fresh
+smallharness code "add a --verbose flag" --expand 2 --run fresh
 ```
 
 **Web interface.** `smallharness web` opens all of this in your browser (chat with
@@ -101,8 +101,8 @@ in `.smallharness/`. In any terminal mode, `/help` lists the commands.
 ## Documentation
 
 The [docs](docs/README.md) cover each part in depth:
-[Chat](docs/chat.md) · [Research](docs/research.md) · [Planner](docs/planner.md) ·
-[Web interface](docs/web.md) ·
+[Chat](docs/chat.md) · [Research](docs/research.md) · [Code](docs/code.md) ·
+[Web interface](docs/web.md) · [Speech](docs/speech.md) ·
 [Commands](docs/commands.md) · [Models](docs/models.md) ·
 [Engines](docs/engines.md) · [Configuration](docs/configuration.md) ·
 [Tools](docs/tools.md) · [Development](docs/development.md)

@@ -16,6 +16,8 @@ python -m unittest discover -s tests    # runs against the mock backend: no mode
 | `notes.py`, `notemode.py` | notes, and note mode |
 | `plans.py`, `planning.py` | plans as data; creating, expanding and running them |
 | `relics.py` | the files plans wrote |
+| `gemini.py`, `pubmed.py`, `keys.py` | outside sources on command: Gemini, PubMed, API keys |
+| `speech.py` | speech to text (Whisper, Vosk) and text to speech (Piper, Bark) |
 | `engines.py`, `models.py`, `modelinfo.py` | LiteRT-LM and Ollama: models, downloads, context size |
 | `backends/` | talking to a model: LiteRT-LM server, Python and CLI, Ollama, mock |
 | `resources.py`, `pool.py` | RAM checks and model instances |

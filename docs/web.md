@@ -10,16 +10,18 @@
   start of a line suggests commands; Tab completes one. See [Chat](chat.md).
 - **Research**: *Ask* (answers with `[n]` links, Attach on each answer, the attached
   ones above the question box, a speed line, and files and notes with checkboxes for
-  the scope) and *Bibliography* (each reference, and its excerpt).
+  the scope; **Gemini** asks a larger model instead), *Bibliography* (each reference, and its
+  excerpt) and *PubMed* (search open-access articles, add them by DOI).
 - **Notes**: write, search, filter by `#tag`, edit and delete notes.
-- **Planner**: create, draft or edit plans, a row per step (a tool dropdown, then what
+- **Code**: create, draft or edit plans, a row per step (a tool dropdown, then what
   to do) with its details and checks, or as text; expand (which steps, how many passes,
   parallel, whether to propose checks); run fresh or continuous, with the
-  [persistence](planner.md) gauge. Tick a step to mark it done, or
+  [persistence](code.md) gauge. Tick a step to mark it done, or
   untick it (or *untick all*) so the next run does it again. Delete a plan from its
   page or with the ✕ in the list.
-- **Models**: use, pull with progress, delete.
-- **Settings**, with two sub-tabs: *Settings* (status, every setting) and *Tools*
+- **Models**: use, pull with progress, delete; the *Speech* card chooses and pulls
+  [speech](speech.md) engines and models (🎤 dictation and *speak* in chat).
+- **Settings**, with two sub-tabs: *Settings* (status, API keys, every setting) and *Tools*
   (each tool, whether it asks first, and its arguments).
 
 ## Relics

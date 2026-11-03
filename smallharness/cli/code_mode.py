@@ -1,14 +1,16 @@
-"""Planner mode in the terminal: plan code changes, expand the steps, run them."""
+"""Code mode in the terminal: plan code changes, expand the steps, run them."""
 from __future__ import annotations
 
 from .. import ui
 from ..planning import (
+    PERMISSIONS,
     PERSISTENCE_MAX,
     Plan,
     PlanRunner,
     create_plan,
     draft_plan,
     edit_plan,
+    clamp_permissions,
     clamp_persistence,
     expand,
     plan_text,
@@ -24,13 +26,15 @@ HELP = [
     ("/expand [N,M|all] [times=K] [checks]", "one more pass of detail for those steps (all by default);"
                                             " `checks`: also propose checks"),
     ("/persist [0-10|max]", "how many times a failed step is tried again, each from a clean context"),
-    ("/run [fresh|continuous] [parallel]", "carry out the plan (risky tools ask first)"),
+    ("/permissions [ask|write|all]", "what runs without asking: nothing (ask), file writes (write), "
+                                     "or file writes and commands (all)"),
+    ("/run [fresh|continuous] [parallel]", "carry out the plan (risky tools ask first, as /permissions says)"),
     ("/tools", "the tools plan runs can use"),
 ]
 
 
-class PlannerShell(Shell):
-    name = "planner"
+class CodeShell(Shell):
+    name = "code"
     about = "plan code changes from a goal; expand each step pass by pass; run the plan"
     hint = "type a goal to plan it"
     help = HELP
@@ -154,6 +158,15 @@ class PlannerShell(Shell):
             self.h.plans.save(plan)
         print(f"  persistence {persistence_label(plan)}")
 
+    def cmd_permissions(self, arg):
+        plan = self._current()
+        if not plan:
+            return
+        if arg.strip():
+            plan.permissions = clamp_permissions(arg)
+            self.h.plans.save(plan)
+        print(f"  permissions {permissions_label(plan)}")
+
     # ------------------------------------------------------------- running
     def cmd_run(self, arg):
         plan = self._current()
@@ -163,6 +176,7 @@ class PlannerShell(Shell):
         mode = next((w for w in words if w in ("fresh", "continuous")), self.h.cfg["plan"]["default_mode"])
         runner = PlanRunner(self.h, plan, mode, self.ev, parallel=("parallel" in words) or None)
         print(ui.dim(f"  persistence {persistence_label(plan)}"))
+        print((ui.risky if plan.permissions != "ask" else ui.dim)(f"  permissions {permissions_label(plan)}"))
 
         def start(t):
             print(ui.accent(f"▶ task {t.num}: {t.task}") + ui.dim(f"  [{t.tool}] · {mode} context"))
@@ -191,3 +205,7 @@ def persistence_label(plan: Plan) -> str:
     if not plan.persistence:
         return "0: a failed step is not tried again"
     return f"{plan.persistence}: a failed step is tried up to {plan.persistence} more time(s)"
+
+
+def permissions_label(plan: Plan) -> str:
+    return f"{plan.permissions}: {PERMISSIONS[plan.permissions]}"

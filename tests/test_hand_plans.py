@@ -40,7 +40,7 @@ class HandPlans(Base):
 
     def test_terminal_draft_and_edit(self):
         h = self.harness()
-        shell = cli.PlannerShell(h, cli.TerminalEvents(), True)
+        shell = cli.CodeShell(h, cli.TerminalEvents(), True)
         typed = iter(["GOAL: tidy the docs", "", "[safe_list_files] List the docs", "   only the docs/ folder",
                       "[none] Summarize (after: 1)", "."])
         with mock.patch.dict("os.environ", {"VISUAL": "", "EDITOR": ""}), \

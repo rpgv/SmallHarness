@@ -16,3 +16,6 @@ smallharness.toml
 .idea/
 .DS_Store
 .devcontainer/
+
+# API keys, if kept beside a project by mistake
+keys.toml

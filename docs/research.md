@@ -37,6 +37,37 @@ If nothing matches, the model is not asked.
   again. `/find WORDS` shows the excerpts a question would get, without asking the
   model.
 
+## Outside sources: Gemini and PubMed
+Nothing leaves your machine unless you type one of these commands. Only the question,
+search words or identifier are sent.
+
+- **Gemini** (`/gemini QUESTION`, or **Gemini** beside Ask on the web) asks a model
+  much larger than the local one, for what it knows. Only the question is sent: no
+  files, no notes, no conversation. The answer joins the session like any other, so
+  you can attach it (`/attach N`) to keep it in mind, or save it (`/save N [NAME]`, or
+  *Save* on the answer) to put it into the knowledge base as a Markdown file in
+  `.smallharness/library/`. In chat, `/gemini QUESTION` adds the answer to the
+  conversation, and `/kb N` puts it into the knowledge base.
+  - It needs a Gemini API key, free from Google AI Studio. Set `GEMINI_API_KEY`, or run
+    `smallharness key gemini` (or use **Settings → API keys** on the web). The key is
+    kept in `~/.config/smallharness/keys.toml`, outside every project and readable by
+    you only. A key in a workspace is never read.
+  - `[gemini].model` (default `gemini-flash-latest`) answers. If it is overloaded, out
+    of free quota or too slow, the models in `[gemini].fallback` are tried in turn, and
+    the answer says which model answered. Answers can take up to a minute.
+  - Answers come from the model's own knowledge, as of its training. With
+    `[gemini].search = true` they are grounded in Google Search and list their pages,
+    but that needs billing on the key's project: on the free tier every grounded call
+    is refused with a quota error.
+- **PubMed** (`/pubmed WORDS`, or the **PubMed** pane on the web) lists open-access
+  articles in PubMed Central, most relevant first. `/doi DOI|PMCID|PMID|N …` (or
+  *Add*) puts articles into the knowledge base, where `N` is a number from the last
+  search. You get the full text (title, authors, abstract and sections; tables and
+  figures are left out) when PubMed Central has it, and the PubMed abstract otherwise.
+  Each article is saved as `.smallharness/library/pubmed-<PMCID>.md`. No key is
+  needed; an NCBI key (`NCBI_API_KEY`, or `smallharness key ncbi`) raises the rate
+  limit.
+
 ## Notes
 Notes are Markdown files in `.smallharness/notes/<n>.md`, indexed into the knowledge
 base as soon as they are saved. Tags are optional: write `#word` anywhere (`# Heading`

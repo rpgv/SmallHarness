@@ -229,6 +229,7 @@ class WebApp:
                   "checks": [asdict(c) for c in t.checks]} for t in plan.tasks]
         return {"id": plan.id, "goal": plan.goal, "mode": plan.mode, "tasks": tasks,
                 "persistence": plan.persistence, "persistence_max": PERSISTENCE_MAX,
+                "permissions": plan.permissions,
                 "finished": plan.finished, "text": plan_text(plan)}
 
     def load_plan(self, plan_id: str) -> Plan:

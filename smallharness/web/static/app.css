@@ -34,6 +34,7 @@ button.secondary { color: var(--blue); border-color: var(--blue-dim); }
 button.secondary:hover:not(:disabled) { background: var(--blue); border-color: var(--blue); color: #000; }
 button.danger { background: var(--red); color: #000; }
 button.danger:hover:not(:disabled) { background: #ff6669; }
+select.danger { border-color: var(--red); color: var(--red); }
 button.link { border: 0; color: var(--blue); padding: 0 4px; }
 button.link:hover:not(:disabled) { background: none; text-decoration: underline; color: var(--blue); }
 input, select, textarea {
@@ -376,3 +377,22 @@ dialog::backdrop { background: rgb(0 0 0 / .7); }
   .check-row { grid-template-columns: auto 1fr auto; margin-left: 12px; }
   .check-row .what { grid-column: 1 / -1; grid-row: 2; }
 }
+#export label { display: block; margin: 0.6em 0; }
+#export select, #export input:not([type=checkbox]) { width: 100%; box-sizing: border-box; margin-top: 0.25em; }
+.answer.web .question { color: var(--blue); }
+.answer ol.sources { margin: 0.4em 0 0.2em 1.2em; padding: 0; font-size: 0.9em; }
+.answer ol.sources a { word-break: break-all; }
+.pubmed { flex: 1; padding: 12px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+.pubmed .row input { flex: 1; min-width: 0; }
+.pubmed-results li.article { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--line, #333); }
+#key-rows input { width: 100%; box-sizing: border-box; }
+.input-wrap { position: relative; flex: 1; display: flex; }
+.input-wrap textarea { flex: 1; padding-right: 40px; }
+button.mic { position: absolute; right: 6px; bottom: 6px; padding: 2px 6px; background: transparent; border: 1px solid var(--line);
+  border-radius: var(--radius); cursor: pointer; font-size: 15px; line-height: 1.2; }
+button.mic.recording { background: var(--red); border-color: var(--red); animation: pulse 1s infinite; }
+button.mic.working { opacity: 0.5; cursor: progress; }
+@keyframes pulse { 50% { opacity: 0.55; } }
+.speech-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px 14px; margin: 8px 0; }
+.speech-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 0.9em; }
+.speech-grid select, .speech-grid input { width: 100%; box-sizing: border-box; }

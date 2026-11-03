@@ -10,7 +10,11 @@ notes, searched by the harness and answered from by the model.
   point into the session's bibliography (`.smallharness/research/<id>.md`), which
   lists each source, line and excerpt.
 - Attach an answer to keep it in the context of later questions (CAG); detach it to
-  take it out. Questions can be limited to some files (the scope)."""
+  take it out. Questions can be limited to some files (the scope).
+- Outside sources, only on command: asking Gemini, a larger model (`gemini`), gives
+  an answer that can be attached like any other, or saved into the knowledge base
+  (`save`); PubMed (`pubmed`) finds open-access articles, and `add_article` puts one
+  into the knowledge base by DOI, PMCID or PMID."""
 from __future__ import annotations
 
 import re
@@ -49,10 +53,23 @@ class Answer:
     refs: list[int]                       # the references it rests on
     scope: list[str] = field(default_factory=list)
     attached: bool = False
+    kind: str = "kb"                      # kb: from the knowledge base | gemini: asked of Gemini
+    sources: list[dict] = field(default_factory=list)   # gemini with search: {"title", "url"}
+    model: str = ""                       # gemini: the model that answered
+    saved: str = ""                       # the knowledge-base source it was saved as
+
+    def markdown(self) -> str:
+        out = [f"# {self.question}", "", _plain(self.text) if self.kind == "kb" else self.text.strip(), ""]
+        if self.sources:
+            out += ["## Sources", ""] + [f"{i}. {x['title']} - {x['url']}" for i, x in enumerate(self.sources, 1)]
+        if self.model:
+            out += ["", f"_Answered by {self.model}._"]
+        return "\n".join(out).strip() + "\n"
 
     def to_dict(self) -> dict:
         return {"num": self.num, "question": self.question, "text": self.text, "refs": self.refs,
-                "scope": self.scope, "attached": self.attached}
+                "scope": self.scope, "attached": self.attached, "kind": self.kind, "sources": self.sources,
+                "saved": self.saved, "model": self.model}
 
 
 class Research:
@@ -63,6 +80,7 @@ class Research:
         self._ref_nums: dict[tuple[str, int], int] = {}
         self.answers: list[Answer] = []
         self.scope: list[str] = []            # sources (files, folders, notes); empty = everything
+        self.articles: list = []              # the last PubMed search (pubmed.Article)
 
     @property
     def settings(self) -> dict:
@@ -119,6 +137,55 @@ class Research:
         if uploaded.parent == self.h.cfg.state.library:
             uploaded.unlink(missing_ok=True)
         self.scope = [s for s in self.scope if s != source]
+
+    def add_text(self, name: str, text: str) -> tuple[str, IndexResult]:
+        """A document made here (a saved answer, a fetched article): kept in the
+        library, then indexed. A file of the same name is replaced. Returns its source."""
+        name = re.sub(r"[^\w.-]+", "_", Path(name).name).strip("._") or "document"
+        if not name.endswith(".md"):
+            name += ".md"
+        dest = self.h.cfg.state.library / name
+        source = dest.relative_to(self.h.cfg.workspace).as_posix() if dest.is_relative_to(self.h.cfg.workspace) else str(dest)
+        if source in self.h.project_rag.sources:
+            self.h.project_rag.remove(source)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+        return source, self.h.project_rag.add_path(dest, self.h.cfg.workspace, self.h.cfg["rag"])
+
+    # ------------------------------------------------------ outside sources
+    def gemini(self, question: str) -> Answer:
+        """Ask Gemini, a larger model: an answer numbered like the others, without excerpts."""
+        from .gemini import ask
+        found = ask(question, self.h.cfg["gemini"])
+        answer = Answer(len(self.answers) + 1, found.question, found.text, [], kind="gemini", sources=found.sources,
+                        model=found.label())
+        self.answers.append(answer)
+        return answer
+
+    def save(self, num: int, name: str = "") -> tuple[Answer, IndexResult]:
+        """Put answer `num` into the knowledge base, as a Markdown file in the library."""
+        a = self.answer(num)
+        slug = "-".join(re.findall(r"\w+", a.question.lower())[:8]) or f"answer-{num}"
+        a.saved, res = self.add_text(name or f"{a.kind}-{slug}", a.markdown())
+        return a, res
+
+    def pubmed(self, words: str, n: int | None = None) -> list:
+        """Open-access articles in PubMed Central for these words (numbered 1… for add_article)."""
+        from .pubmed import Client
+        self.articles = Client(self.h.cfg["pubmed"]).search(words, n)
+        return self.articles
+
+    def add_article(self, ident: str):
+        """An article into the knowledge base by DOI, PMCID, PMID, or its number in the
+        last PubMed search. Full text when PMC has it, else the abstract."""
+        from .pubmed import Client
+        ident = ident.strip()
+        if ident.isdigit() and 1 <= int(ident) <= len(self.articles) and len(ident) < 4:
+            hit = self.articles[int(ident) - 1]
+            ident = hit.pmcid or hit.doi
+        art = Client(self.h.cfg["pubmed"]).fetch(ident)
+        source, res = self.add_text(art.filename(), art.text)
+        return art, source, res
 
     # -------------------------------------------------------------- scope
     def set_scope(self, sources: list[str]) -> None:

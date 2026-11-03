@@ -96,6 +96,29 @@ class Chat(WorkspaceTest):
         self.assertNotIn("content", added[-1].meta["args"])
         self.assertEqual([r["by"] for r in self.h.relics.all()], [[f"chat:{chat.id}"]])
 
+    def test_export_saves_a_message_or_a_code_block_without_asking(self):
+        ev = Allow()
+        chat = self.chat(["Two:\n```python\nprint(1)\n```\nand\n```bash\necho 2\n```"])
+        chat.send("two snippets", events=ev)
+        added = chat.send("/export", events=ev)                         # the last answer, whole
+        self.assertEqual(ev.asked, [])                                   # a command, not a tool: no asking
+        self.assertEqual((added[-1].kind, added[-1].seen), ("export", ""))
+        whole = self.ws / f"exports/{chat.id}-2.md"
+        self.assertTrue(whole.read_text().startswith("Two:"))
+        chat.send("/export 2:2", events=ev)                              # its second code block
+        self.assertEqual((self.ws / f"exports/{chat.id}-2-2.sh").read_text(), "echo 2\n")
+        chat.send("/export #2.1 src/one.py", events=ev)
+        self.assertEqual((self.ws / "src/one.py").read_text(), "print(1)\n")
+        self.assertIn("src/one.py", [r["path"] for r in self.h.relics.all()])
+        refused = chat.send("/export 2:1 src/one.py", events=ev)         # exists: needs -f
+        self.assertEqual(refused[-1].kind, "error")
+        self.assertIn("-f", refused[-1].text)
+        chat.send("/export 2 src/one.py -f", events=ev)
+        self.assertTrue((self.ws / "src/one.py").read_text().startswith("Two:"))
+        for bad in ("/export 2:9", "/export 99", "/export 2 ../out.txt"):
+            self.assertEqual(chat.send(bad, events=ev)[-1].kind, "error", bad)
+        self.assertFalse((self.ws.parent / "out.txt").exists())
+
     def test_agent_lends_tools_for_one_message(self):
         chat = self.chat(['<tool>{"name": "safe_read_file", "args": {"path": "notes.txt"}}</tool>',
                           "The code is tangerine."])

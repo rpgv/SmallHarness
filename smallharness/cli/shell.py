@@ -1,5 +1,5 @@
 """What every terminal mode shares: the input loop, help, switching modes, status, and
-the model and settings commands. Each mode (chat, research, planner) adds its own
+the model and settings commands. Each mode (chat, research, code) adds its own
 commands and decides what plain text means."""
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ SWITCH = "switch"      # what a command returns to go back to the mode menu
 
 COMMON_HELP = [
     ("/help", "show this help"),
-    ("/mode", "go back to the mode menu (chat, research, planner)"),
+    ("/mode", "go back to the mode menu (chat, research, code)"),
     ("/status", "model, instances, search"),
     ("/model [NAME|PATH|ID] [ctx=N|auto …]", "show the model, or switch to another one"),
     ("/models, /pull NAME, /delete NAME", "list, download or delete models"),

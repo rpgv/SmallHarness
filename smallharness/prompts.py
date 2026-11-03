@@ -38,7 +38,7 @@ ATTACHED = """ATTACHED (earlier answers you were asked to keep in mind):
 
 """
 
-# ----------------------------------------------------------------- planner
+# ----------------------------------------------------------------- code mode (plans)
 PLAN_SYSTEM = "You write short, concrete plans for code changes."
 
 PLAN = """PLAN FORMAT: one task per line, at most {max_tasks}:
