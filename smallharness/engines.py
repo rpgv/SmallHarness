@@ -404,9 +404,10 @@ def engine(cfg) -> Engine:
 def ram_warning(cfg, size: int) -> tuple[str, bool]:
     """(warning, will_not_run) for a model of `size` bytes, from the RAM check."""
     from .resources import capacity
+    from .resources import ram_share_warning
     res = cfg["resources"]
-    if not res.get("manage_ram", True):
-        return "", False
+    if not res.get("manage_ram", False):
+        return ram_share_warning(size // 2**20, res), False
     try:
         rep = capacity("", cfg["model"].get("auto_context_max") or 4096, {**res, "model_mb": size // 2**20})
     except Exception:  # RAM unreadable here: no basis for a warning

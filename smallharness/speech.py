@@ -475,3 +475,101 @@ def wav_bytes(frames: bytes, rate: int) -> bytes:
         w.setframerate(rate)
         w.writeframes(frames)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------- reading aloud
+# The TTS tab: a text (typed, from a file, or rewritten by the loaded model) cut into
+# short pieces, each spoken with speak() while the one before plays.
+SEGMENT_CHARS = 400
+_SENTENCE = re.compile(r"(?<=[.!?…:;])[\"')\]]*\s+(?=[\"'(\[]?[A-Z0-9À-Ý])")
+
+
+def segments(text: str, max_chars: int = SEGMENT_CHARS) -> list[str]:
+    """`text` as pieces to read one after another: sentences, joined while they are
+    short, a long one cut at a comma or a space; a paragraph always starts a new piece."""
+    return [s for para in paragraphs(text, max_chars) for s in para]
+
+
+def paragraphs(text: str, max_chars: int = SEGMENT_CHARS) -> list[list[str]]:
+    """segments(), kept in their paragraphs."""
+    return [p for p in (_pieces(para, max_chars) for para in re.split(r"\n\s*\n", text)) if p]
+
+
+def _pieces(para: str, max_chars: int) -> list[str]:
+    out: list[str] = []
+    para = " ".join(para.split())
+    if para:
+        piece = ""
+        for sentence in _SENTENCE.split(para):
+            while len(sentence) > max_chars:
+                cut = max(sentence.rfind(", ", 0, max_chars), sentence.rfind("; ", 0, max_chars))
+                cut = cut + 1 if cut > max_chars // 3 else sentence.rfind(" ", 0, max_chars)
+                cut = cut if cut > 0 else max_chars
+                if piece:
+                    out.append(piece)
+                    piece = ""
+                out.append(sentence[:cut].strip())
+                sentence = sentence[cut:].strip()
+            if piece and len(piece) + 1 + len(sentence) > max_chars:
+                out.append(piece)
+                piece = ""
+            piece = f"{piece} {sentence}".strip()
+        if piece:
+            out.append(piece)
+    return [s for s in out if s]
+
+
+def read_file(cfg, path: Path) -> str:
+    """A file's text to read aloud: text files as they are, PDFs and images through the
+    knowledge base's extraction (pdftotext, OCR), within [rag]'s size limits."""
+    from .context.extract import ExtractError, extract, kind_of, size_limit_mb
+    if not path.is_file():
+        raise NotFound(f"{path.name} is not a file")
+    rag = cfg["rag"]
+    kind = kind_of(path, rag) or "text"
+    if path.stat().st_size > size_limit_mb(kind, rag) * 2**20:
+        raise Invalid(f"{path.name} is larger than {size_limit_mb(kind, rag)} MB")
+    try:
+        text = extract(path, kind, rag)
+    except ExtractError as e:
+        raise Invalid(f"{path.name}: {e}") from None
+    if not text.strip():
+        raise Invalid(f"{path.name} has no text to read")
+    return text
+
+
+PREPARE = {"tidy": "tidied for listening", "summary": "key points"}
+
+
+def prepare(h, text: str, mode: str, events=None) -> str:
+    """The text rewritten by the loaded model before it is read: 'tidy' (as written, but
+    nothing that sounds bad aloud) or 'summary' (its key points, to get through it faster).
+    A long text goes in parts that fit the context, each streamed as it is written."""
+    from . import prompts
+    if mode not in PREPARE:
+        raise Invalid("prepare: tidy or summary")
+    text = text.strip()
+    if not text:
+        raise Invalid("nothing to prepare")
+    system = prompts.READ_TIDY if mode == "tidy" else prompts.READ_SUMMARY
+    room = max(500, (h.cfg.context_tokens - h.cfg["model"]["max_output_tokens"]) // 2)
+    parts, part = [], ""
+    for para in re.split(r"\n\s*\n", text):
+        if part and h.counter(part + "\n\n" + para) > room:
+            parts.append(part)
+            part = ""
+        part = f"{part}\n\n{para}".strip()
+        while h.counter(part) > room:           # one paragraph longer than the room
+            cut = h.counter.truncate(part, room)
+            parts.append(cut)
+            part = part[len(cut):].strip()
+    if part:
+        parts.append(part)
+    done = []
+    for i, p in enumerate(parts, 1):
+        if events and len(parts) > 1:
+            events.emit({"type": "status", "text": f"part {i} of {len(parts)}"})
+        done.append(h.generate_clean(p, system, stream=events is not None, events=events).strip())
+        if events:
+            events.emit({"type": "text", "text": "\n\n"})
+    return "\n\n".join(d for d in done if d)

@@ -177,6 +177,7 @@ class PoolAccounting(unittest.TestCase):
     def pool(self, memory):
         cfg = Config(Path(tempfile.gettempdir()))
         cfg.data["model"]["path"] = "/models/m.litertlm"
+        cfg.data["resources"]["manage_ram"] = True
         return ModelPool(cfg, lambda: SlowBackend(memory))
 
     def peak_concurrency(self, p, workers=6):
@@ -314,7 +315,7 @@ class ManagedServer(unittest.TestCase):
     def test_auto_mode_and_pool_counting(self):
         self.assertEqual(resolve_mode({"mode": "auto", "server": {"launch": True}}), "server")
         with tempfile.TemporaryDirectory() as d:
-            cfg = Config.load(Path(d), overrides={"litert": {"server": self.cfg()}})
+            cfg = Config.load(Path(d), overrides={"litert": {"server": self.cfg()}, "resources": {"manage_ram": True}})
             be = make_backend(cfg)
             self.assertIsInstance(be, ManagedServerBackend)
             self.assertEqual(be.memory, "resident")
@@ -333,6 +334,20 @@ def _free_port():
 
 
 class UnmanagedRam(unittest.TestCase):
+    def test_off_by_default_and_warns_on_a_large_share(self):
+        from smallharness.resources import ram_share_warning
+        self.assertFalse(Config(Path(tempfile.gettempdir())).data["resources"]["manage_ram"])
+        res = {"warn_ram_share": 0.30}
+        self.assertEqual(ram_share_warning(2048, res, total_mb=8192), "")      # 2 GB of 8 GB: fine
+        self.assertIn("36%", ram_share_warning(3000, res, total_mb=8192))
+        self.assertEqual(ram_share_warning(3000, {"warn_ram_share": 0}, total_mb=8192), "")
+        with mock.patch.object(pool_mod, "capacity", lambda *a, **k: fake_report(0, fits=False)):
+            rep = self.pool("resident").report()                             # 2000 MB of 8000 MB
+            self.assertEqual(rep.warning, "")
+            rep = self.pool("resident", warn_ram_share=0.2).report()
+            self.assertIn("25%", rep.warning)
+            self.assertIn("WARNING: the model", rep.describe())
+
     def pool(self, memory, **res):
         cfg = Config(Path(tempfile.gettempdir()))
         cfg.data["model"]["path"] = "/models/m.litertlm"
@@ -345,7 +360,7 @@ class UnmanagedRam(unittest.TestCase):
                 p = self.pool(memory)
                 rep = p.report()
                 self.assertTrue(rep.fits)
-                self.assertIn("does not fit", rep.note)
+                self.assertIn("left to the OS", rep.note)
                 self.assertEqual(p.spawn(4), 1)          # capped at one
                 with p.acquire():                        # no RAM refusal, even per_call
                     pass
@@ -356,7 +371,7 @@ class UnmanagedRam(unittest.TestCase):
             raise RuntimeError("cannot read RAM")
         with mock.patch.object(pool_mod, "capacity", broken):
             p = self.pool("resident")
-            self.assertIn("disabled", p.report().describe())
+            self.assertIn("left to the OS", p.report().describe())
             p.ensure_one()
             self.assertEqual(len(p.instances), 1)
 

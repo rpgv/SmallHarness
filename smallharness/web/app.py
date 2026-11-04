@@ -222,6 +222,8 @@ class WebApp:
             raise ApiError(400, "the model does not fit in free RAM:\n" + rep.describe())
         if events:
             events.emit({"type": "status", "text": f"loading {self.h.cfg.model_name}"})
+            if rep.warning:
+                events.emit({"type": "notice", "text": "RAM: " + rep.warning})
         start = time.perf_counter()
         try:
             self.h.start()
@@ -244,6 +246,12 @@ class WebApp:
         return self.h.plans.load(plan_id)
 
     # -------------------------------------------------------------- state
+    def _ram_warning(self) -> str:
+        try:
+            return self.h.pool.ram_warning()
+        except Exception:  # an unreadable model or RAM: nothing to warn about
+            return ""
+
     def state(self) -> dict:
         h, cfg = self.h, self.h.cfg
         be = h.pool.instances[0] if h.pool.instances else None
@@ -257,6 +265,7 @@ class WebApp:
                       "mode": getattr(be, "mode", "") if be else "", "context_tokens": cfg.context_tokens,
                       "context_note": cfg.context.note},
             "instances": len(h.pool.instances), "capacity": capacity, "ram_managed": h.pool.ram_managed,
+            "ram_warning": self._ram_warning(),
             "search": h.search_mode(), "embeddings": bool(h.embedder),
             "plan": self.plan.id if self.plan else None, "notes": len(h.notes.all()),
             "knowledge": {"sources": len(h.project_rag.sources), "chunks": len(h.project_rag)},

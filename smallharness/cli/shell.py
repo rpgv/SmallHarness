@@ -58,6 +58,12 @@ class Shell:
         note = cfg.context.note
         if note and not note.startswith("auto:"):
             print(ui.warn(note))
+        try:
+            ram = self.h.pool.ram_warning()
+        except Exception:  # an unreadable model or RAM: nothing to warn about
+            ram = ""
+        if ram:
+            print(ui.warn("RAM: " + ram))
         be = self.h.pool.instances[0] if self.h.pool.instances else None
         if be is not None and be.memory == "per_call":
             print(ui.warn("command-line mode: the model is reloaded on every call (slow, no streaming).\n"

@@ -315,6 +315,7 @@ class Commands(Base):
     def test_too_big_for_this_machine_asks_first(self):
         from smallharness.resources import CapacityReport, RamInfo
         report = CapacityReport(RamInfo(1000, 500, "test"), 900, 99_999, 0, 0, False)
+        self.config.write_text(self.config.read_text() + "[resources]\nmanage_ram = true\n")
         with mock.patch("smallharness.resources.capacity", return_value=report):
             code, out = self.main("pull", "owner/repo/m.litertlm")
             self.assertEqual(code, 1)

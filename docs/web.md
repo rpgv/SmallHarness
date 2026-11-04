@@ -9,10 +9,11 @@
   listed above the conversation), *rewind here*, and on yours *edit*. Typing `/` at the
   start of a line suggests commands; Tab completes one. See [Chat](chat.md).
 - **Research**: *Ask* (answers with `[n]` links, *Pin* on each answer, the pinned
-  ones above the thread, a speed line, and files and notes with checkboxes for the
-  scope), *Gemini* (ask a larger model; pin or save its answers), *Bibliography* (each
+  ones above the thread, a speed line; on the left, the files (add a path or upload)
+  above the notes, each list scrolling on its own, with checkboxes for the scope), *Gemini* (ask a larger model; pin or save its answers), *Bibliography* (each
   reference, and its excerpt) and *PubMed* (search open-access articles, add them by DOI).
 - **Notes**: write, search, filter by `#tag`, edit and delete notes.
+- **TTS**: read a text aloud, to get through files faster. See [Speech](speech.md#the-tts-tab).
 - **Code**: create, draft or edit plans, a row per step (a tool dropdown, then what
   to do) with its details and checks, or as text; expand (which steps, how many passes,
   parallel, whether to propose checks); run fresh or continuous, with the

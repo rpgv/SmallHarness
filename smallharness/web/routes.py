@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from ..config import DEFAULTS, flatten, is_secret, parse_value
@@ -14,7 +15,7 @@ from .app import ApiError, Job, WebApp, WebEvents
 
 # ------------------------------------------------------------------ routes
 Route = Callable[..., Any]
-BINARY_ROUTES = {"/api/research/upload", "/api/speech/transcribe"}    # the body is a file, not JSON
+BINARY_ROUTES = {"/api/research/upload", "/api/speech/transcribe", "/api/tts/upload"}    # the body is a file, not JSON
 
 
 ROUTES: list[tuple[str, re.Pattern, Route]] = []
@@ -749,3 +750,61 @@ def post_config(app: WebApp, q, body):
         except (KeyError, RuntimeError) as e:
             raise ApiError(400, str(e.args[0] if e.args else e)) from None
     return {"done": done, "state": app.state()}
+
+
+# ------------------------------------------------------------------- TTS
+# The TTS tab reads a text aloud: cut into pieces here, each spoken by /api/speech/speak.
+@route("POST", "/api/tts/segments")
+def post_tts_segments(app: WebApp, q, body):
+    from .. import speech
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise ApiError(400, "'text' is required")
+    paras = speech.paragraphs(text)
+    return {"segments": [s for para in paras for s in para], "paragraphs": [len(para) for para in paras]}
+
+
+@route("POST", "/api/tts/file")
+def post_tts_file(app: WebApp, q, body):
+    """A workspace file's text (text files, PDFs, images through OCR)."""
+    from .. import speech
+    path = _need(body, "path")
+    try:
+        p = app.h.tool_context().resolve(path)
+    except PermissionError as e:
+        raise ApiError(403, str(e)) from None
+    if not p.exists():
+        raise ApiError(404, f"{path} does not exist")
+    return {"source": path, "text": speech.read_file(app.h.cfg, p)}
+
+
+@route("POST", "/api/tts/upload")
+def post_tts_upload(app: WebApp, q, body):
+    """A file sent from the page, read for its text and not kept."""
+    import tempfile
+
+    from .. import speech
+    name = Path(q.get("name") or "").name
+    if not name:
+        raise ApiError(400, "a file needs a name")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / name
+        p.write_bytes(body["data"])
+        return {"source": name, "text": speech.read_file(app.h.cfg, p)}
+
+
+@route("POST", "/api/tts/prepare")
+def post_tts_prepare(app: WebApp, q, body):
+    """The text rewritten by the loaded model before reading ('mode': tidy | summary), streamed."""
+    from .. import speech
+    text, mode = _need(body, "text"), body.get("mode") or "tidy"
+    if mode not in speech.PREPARE:
+        raise ApiError(400, "'mode' is tidy or summary")
+    app.check_free()
+
+    def stream(ev: WebEvents) -> Iterator[dict]:
+        with app.model_work("preparing text to read"):
+            app.ensure_loaded(ev)
+            out = speech.prepare(app.h, text, mode, ev)
+            yield {"type": "done", "text": out, "state": app.state()}
+    return stream

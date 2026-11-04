@@ -44,7 +44,8 @@ max_concurrent = 1               # requests at once; match OLLAMA_NUM_PARALLEL
 timeout = 600
 
 [resources]
-manage_ram = true                # false: skip all RAM checks and run exactly one instance
+manage_ram = false               # true: check RAM before loading, and run as many instances as fit (Code)
+warn_ram_share = 0.30            # warn when the model file is more than this share of total RAM (0: never)
 reserve_ram_mb = 1024            # keep this much free for the OS
 overhead_factor = 1.25           # runtime RAM over model file size
 kv_cache_mb = 0                  # 0 = exact from the model file's KV-cache tensors, else estimated

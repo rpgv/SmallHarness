@@ -132,6 +132,24 @@ class Web(unittest.TestCase):
         self.assertEqual(self.req("POST", "/api/research/upload?name=x.md", raw=b"text",
                                   headers={"Content-Type": "application/json"})[0], 403)    # must be binary
 
+    # ------------------------------------------------------------------- TTS
+    def test_reading_aloud(self):
+        _, r = self.req("POST", "/api/tts/segments", {"text": "One. Two.\n\nThree."})
+        self.assertEqual((r["segments"], r["paragraphs"]), (["One. Two.", "Three."], [1, 1]))
+        (self.ws / "doc.md").write_text("A file to read.\n")
+        _, r = self.req("POST", "/api/tts/file", {"path": "doc.md"})
+        self.assertEqual(r["text"], "A file to read.\n")
+        self.assertEqual(self.req("POST", "/api/tts/file", {"path": "nope.md"})[0], 404)
+        self.assertEqual(self.req("POST", "/api/tts/file", {"path": "../outside.md"})[0], 403)
+        status, r = self.req("POST", "/api/tts/upload?name=up.txt", raw=b"Uploaded text.",
+                             headers={"Content-Type": "application/octet-stream"})
+        self.assertEqual((status, r["text"]), (200, "Uploaded text."))
+        self.assertFalse((self.ws / "up.txt").exists())                   # read, not kept
+        _, events = self.req("POST", "/api/tts/prepare", {"text": "Read this [3] aloud.", "mode": "summary"})
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertIn("key points", self.backend.prompts[-1])
+        self.assertEqual(self.req("POST", "/api/tts/prepare", {"text": "x", "mode": "poem"})[0], 400)
+
     # ---------------------------------------------------------------- relics
     def test_running_a_relic(self):
         self.h.relics.record("hi.py", "test")

@@ -214,3 +214,35 @@ class Commands(SpeechTest):
         self.assertEqual((code, printed.getvalue().strip()), (0, "hello there"))
         with mock.patch("sys.stdout", io.StringIO()) as printed:
             self.assertEqual(main(["-w", str(self.ws), "-b", "mock", "stt", str(self.ws / "none.wav")]), 1)
+
+
+class ReadingAloud(SpeechTest):
+    def test_segments(self):
+        text = "First sentence. Second one! A third?\n\nA new paragraph starts a new piece. " + "word, " * 100
+        parts = speech.segments(text, max_chars=80)
+        self.assertEqual(parts[0], "First sentence. Second one! A third?")
+        self.assertTrue(parts[1].startswith("A new paragraph"))
+        self.assertTrue(all(len(p) <= 80 for p in parts))
+        self.assertEqual(" ".join(parts).split(), text.split())          # nothing lost or doubled
+        self.assertEqual(speech.segments("  \n\n "), [])
+
+    def test_read_file_and_prepare(self):
+        (self.ws / "a.md").write_text("Some text.\n")
+        self.assertEqual(speech.read_file(self.h_cfg(), self.ws / "a.md"), "Some text.\n")
+        (self.ws / "empty.md").write_text("  \n")
+        with self.assertRaises(Invalid):
+            speech.read_file(self.h_cfg(), self.ws / "empty.md")
+        with self.assertRaises(NotFound):
+            speech.read_file(self.h_cfg(), self.ws / "none.md")
+        h = self.harness(script=["Point one.", "Point two."])
+        h.cfg.data["model"]["context_tokens"] = 1200
+        h.cfg.data["model"]["max_output_tokens"] = 100
+        long = "\n\n".join(f"Paragraph {i}. " + "words " * 150 for i in range(4))
+        out = speech.prepare(h, long, "summary")
+        self.assertIn("Point one.", out)
+        self.assertIn("Point two.", out)                                  # in parts that fit the context
+        with self.assertRaises(Invalid):
+            speech.prepare(h, long, "poem")
+
+    def h_cfg(self):
+        return self.harness().cfg

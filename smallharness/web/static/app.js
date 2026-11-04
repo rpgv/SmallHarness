@@ -109,11 +109,12 @@ function renderStatus(s) {
   const rows = [
     ["workspace", s.workspace], ["model", `${s.model.name} (${s.model.backend})`],
     ["loaded", s.model.loaded ? `yes · ${s.instances} instance(s)` : "no: loads when first used"],
-    ["instances fit", s.ram_managed ? `${s.capacity} (Code uses up to this many)` : "1 (RAM not managed)"],
+    ["instances fit", s.ram_managed ? `${s.capacity} (Code uses up to this many)` : "1 (RAM left to the OS)"],
     ["context", `${s.model.context_tokens} tokens${s.model.context_note ? " · " + s.model.context_note : ""}`],
     ["search", s.search], ["knowledge base", `${s.knowledge.sources} source(s), ${s.knowledge.chunks} chunks`],
     ["notes", String(s.notes)],
   ];
+  if (s.ram_warning) rows.push(["RAM", "⚠ " + s.ram_warning]);
   if (s.untrusted.length) rows.push(["not trusted", s.untrusted.join("; ")]);
   $("status-list").replaceChildren(...rows.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { text: v })]));
 }
@@ -123,6 +124,7 @@ $("load-btn").addEventListener("click", async () => {
     const r = await api("POST", "/api/load");
     renderState(r);
     toast(r.load_s != null ? `model loaded in ${secs(r.load_s)}` : "model loaded");
+    if (r.ram_warning) toast("RAM: " + r.ram_warning, true);
   } catch (e) { toast(e.message, true); }
   refreshState();
 });
@@ -612,7 +614,7 @@ function renderResearch(r) {
   $("scope-line").textContent = r.scope.length ? `· questions search only the ticked ${r.scope.length === 1 ? "one" : r.scope.length}`
                                                 : "· questions search everything; tick to narrow";
   $("scope-all").hidden = !r.scope.length;
-  renderPins(r);
+  renderResearchPins(r);
   $("research-context-note").hidden = !r.keep_context;
   $("research-context-note").textContent = "Keeping context: each question also sees the latest answers (Settings → Context).";
   if (!running) renderAnswers(r);
@@ -668,7 +670,7 @@ function renderAnswers(r) {
   box.scrollTop = box.scrollHeight;
 }
 // Pinned answers (CAG), above the thread: what later questions keep in mind.
-function renderPins(r) {
+function renderResearchPins(r) {
   const pinned = r.answers.filter((a) => a.pinned);
   $("research-pins").hidden = !pinned.length;
   $("research-pins").replaceChildren(
@@ -854,23 +856,23 @@ function scopeBox(x, scoped) {
     onchange: () => setScope(x.source, box.checked) });
   return box;
 }
+// The library column: files above, notes below, each with a scope checkbox.
+function libraryItem(x, scoped, name, link) {
+  return el("li", { class: scoped.has(x.source) ? "active" : "", title: `${x.source} · ${x.chunks} chunk(s)` },
+    scopeBox(x, scoped), link || el("span", { class: "grow name", text: name }),
+    el("button", { class: "small link", text: "✕", title: "remove from the knowledge base", onclick: () => removeSource(x) }));
+}
 function renderFiles(r) {
   const scoped = new Set(r.scope);
   const files = r.library.filter((x) => !isNote(x));
-  $("files").replaceChildren(...files.map((x) => {
-    const box = scopeBox(x, scoped);
-    return el("span", { class: "file-chip" + (scoped.has(x.source) ? " active" : ""), title: `${x.source} · ${x.chunks} chunk(s)` },
-      el("label", {}, box, document.createTextNode(" " + x.source.replace(/^\.smallharness\/library\//, ""))),
-      el("button", { class: "small link", text: "✕", title: "remove from the knowledge base", onclick: () => removeSource(x) }));
-  }));
-  if (!files.length) $("files").append(el("span", { class: "muted", text: "no files yet: add a path or upload" }));
+  $("files").replaceChildren(...files.map((x) => libraryItem(x, scoped, x.source.replace(/^\.smallharness\/library\//, ""))));
+  if (!files.length) $("files").append(el("li", { class: "muted", text: "no files yet: add a path or upload" }));
 }
 function renderNotes(r) {
   const scoped = new Set(r.scope);
   const notes = r.library.filter(isNote);
-  $("notes").replaceChildren(...notes.map((x) => el("li", { class: scoped.has(x.source) ? "active" : "" },
-    scopeBox(x, scoped),
-    el("a", { href: "#", class: "grow", text: x.title, title: "open in Notes",
+  $("notes").replaceChildren(...notes.map((x) => libraryItem(x, scoped, "",
+    el("a", { href: "#", class: "grow name", text: x.title, title: "open in Notes",
               onclick: (e) => { e.preventDefault(); show("notes"); openNoteById(x.source.slice(5)); } }))));
   if (!notes.length) $("notes").append(el("li", { class: "muted", text: "no notes yet" }));
 }
@@ -2212,6 +2214,242 @@ $("config-save").addEventListener("click", async () => {
 // ================================================================== start
 refreshState();
 loadRelics();
-show(["chat", "research", "notes", "code", "relics", "models", "settings"].includes(recall("sh-view", "")) ? recall("sh-view", "") : "chat");
+show(["chat", "research", "notes", "code", "tts", "relics", "models", "settings"].includes(recall("sh-view", "")) ? recall("sh-view", "") : "chat");
 showPane(["bibliography", "gemini"].includes(recall("sh-pane", "")) ? recall("sh-pane", "") : "ask");
 setInterval(() => { if (!document.hidden && !running) refreshState(); }, 5000);
+
+// =================================================================== TTS
+// Reads a text aloud: cut into pieces by the server, each spoken with the speech voice
+// (Models → Speech) while the next one is made. The loaded model can rewrite the text
+// first (tidied for listening, or its key points). Speed is the player's, any voice.
+const tts = { segs: [], paras: [], cache: new Map(), idx: 0, playing: false, gen: 0, run: 0, audio: null,
+              selection: null, undo: null, segTimer: null };
+let ttsSpeed = Number(recall("sh-tts-speed", "1")) || 1;
+function ttsStatus(text) { $("tts-status").textContent = text || ""; }
+function ttsSelected() {
+  const t = $("tts-text");
+  return t.selectionStart !== t.selectionEnd ? t.value.slice(t.selectionStart, t.selectionEnd) : "";
+}
+function ttsDrop() {                       // the audio made so far no longer matches the text
+  tts.gen++;
+  for (const p of tts.cache.values()) p.then((url) => url && URL.revokeObjectURL(url)).catch(() => {});
+  tts.cache.clear();
+}
+async function ttsSegment(text, label) {
+  const gen = ++tts.gen;
+  const r = await api("POST", "/api/tts/segments", { text });
+  if (gen !== tts.gen) return false;
+  ttsDrop();
+  tts.segs = r.segments;
+  tts.paras = r.paragraphs;
+  tts.selection = label || null;
+  tts.idx = Math.min(tts.idx, Math.max(0, tts.segs.length - 1));
+  renderReading();
+  return true;
+}
+function renderReading() {
+  const box = $("tts-reading");
+  const paras = [];
+  let k = 0;
+  for (const n of tts.paras) {
+    const p = el("p");
+    for (let j = 0; j < n; j++, k++) {
+      const i = k;
+      p.append(el("span", { class: "tts-seg", "data-i": String(i), text: tts.segs[i],
+                            onclick: () => { tts.idx = i; if (tts.playing) ttsPlayFrom(i); else markReading(); } }), " ");
+    }
+    paras.push(p);
+  }
+  box.replaceChildren(...paras);
+  if (!tts.segs.length) box.append(el("p", { class: "muted", text: "The text, piece by piece, shows here as it is read." }));
+  markReading();
+}
+function markReading() {
+  for (const s of $("tts-reading").querySelectorAll(".tts-seg")) {
+    const i = Number(s.dataset.i);
+    s.classList.toggle("now", tts.playing && i === tts.idx);
+    s.classList.toggle("start", !tts.playing && i === tts.idx && tts.idx > 0);
+    s.classList.toggle("done", i < tts.idx);
+  }
+  const now = $("tts-reading").querySelector(`.tts-seg[data-i="${tts.idx}"]`);
+  if (now && tts.playing) now.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  $("tts-where").textContent = tts.segs.length
+    ? `${tts.idx + 1} / ${tts.segs.length}` + (tts.selection ? ` · ${tts.selection}` : "") : "";
+  $("tts-play").textContent = tts.playing ? "⏸ Pause" : tts.idx > 0 ? "▶ Resume" : "▶ Read";
+}
+// Piece i as an audio URL: made once, kept while the text stays the same.
+function ttsAudio(i) {
+  if (!tts.cache.has(i)) {
+    const gen = tts.gen;
+    tts.cache.set(i, api("POST", "/api/speech/speak", { text: tts.segs[i] }).then((r) => {
+      if (gen !== tts.gen) return null;
+      const bytes = Uint8Array.from(atob(r.audio), (c) => c.charCodeAt(0));
+      return URL.createObjectURL(new Blob([bytes], { type: r.type }));
+    }));
+    tts.cache.get(i).catch(() => tts.cache.delete(i));
+  }
+  return tts.cache.get(i);
+}
+async function ttsPlayFrom(i) {
+  if (tts.audio) { tts.audio.onended = null; tts.audio.pause(); }
+  tts.idx = i;
+  tts.playing = true;
+  markReading();
+  const gen = tts.gen, run = ++tts.run;            // a later play, pause or stop ends this one
+  const mine = () => tts.playing && gen === tts.gen && run === tts.run;
+  while (mine() && tts.idx < tts.segs.length) {
+    const at = tts.idx;
+    let url;
+    ttsStatus(tts.cache.has(at) ? "" : "making the voice…");
+    try { url = await ttsAudio(at); } catch (e) { ttsStatus(e.message); ttsPause(); return; }
+    if (!mine() || tts.idx !== at) return;        // paused, changed, or moved meanwhile
+    ttsStatus("");
+    for (let j = at + 1; j <= at + 2 && j < tts.segs.length; j++) ttsAudio(j).catch(() => {});   // the next ones, meanwhile
+    const audio = new Audio(url);
+    Object.assign(audio, { piece: at, gen });       // what it is, to resume it after a pause
+    audio.playbackRate = ttsSpeed;
+    tts.audio = audio;
+    const ended = new Promise((ok) => { audio.onended = () => ok(true); audio.onerror = () => ok(false); });
+    try { await audio.play(); } catch (e) { ttsStatus(e.message); ttsPause(); return; }
+    if (!(await ended) || !mine()) return;
+    if (tts.idx === at) tts.idx++;
+    markReading();
+  }
+  if (mine() && tts.idx >= tts.segs.length) { tts.playing = false; tts.idx = 0; ttsStatus("done"); markReading(); }
+}
+function ttsPause() {
+  tts.playing = false;
+  tts.run++;
+  if (tts.audio) tts.audio.pause();
+  markReading();
+}
+function ttsStop() {
+  ttsPause();
+  if (tts.audio) { tts.audio.onended = null; tts.audio = null; }
+  tts.idx = 0;
+  markReading();
+}
+$("tts-play").addEventListener("click", async () => {
+  if (tts.playing) { ttsPause(); return; }
+  const sel = ttsSelected();
+  if (sel.trim()) {                                    // a selection: read only that, from its start
+    if (!(await ttsSegment(sel, "the selection"))) return;
+    tts.idx = 0;
+  } else if (tts.selection) {                          // back to the whole text
+    if (!(await ttsSegment($("tts-text").value))) return;
+  }
+  if (!tts.segs.length) { toast("nothing to read: type, paste or open a text", true); return; }
+  const a = tts.audio;
+  if (a && a.paused && !a.ended && a.currentTime > 0 && a.piece === tts.idx && a.gen === tts.gen) {   // resume where it paused
+    tts.playing = true;
+    markReading();
+    tts.audio.playbackRate = ttsSpeed;
+    const at = tts.idx, audio = tts.audio, gen = tts.gen, run = ++tts.run;
+    audio.onended = () => { if (tts.playing && run === tts.run && gen === tts.gen && tts.idx === at) ttsPlayFrom(at + 1); };
+    audio.play().catch((e) => { ttsStatus(e.message); ttsPause(); });
+    return;
+  }
+  ttsPlayFrom(tts.idx);
+});
+$("tts-stop").addEventListener("click", ttsStop);
+$("tts-prev").addEventListener("click", () => { const i = Math.max(0, tts.idx - 1); if (tts.playing) ttsPlayFrom(i); else { tts.idx = i; markReading(); } });
+$("tts-next").addEventListener("click", () => {
+  const i = Math.min(tts.segs.length - 1, tts.idx + 1);
+  if (i < 0) return;
+  if (tts.playing) ttsPlayFrom(i); else { tts.idx = i; markReading(); }
+});
+function applyTtsSpeed() {
+  $("tts-speed").value = String(ttsSpeed);
+  $("tts-speed-val").textContent = ttsSpeed.toFixed(1) + "×";
+  if (tts.audio) tts.audio.playbackRate = ttsSpeed;
+}
+$("tts-speed").addEventListener("input", () => { ttsSpeed = Number($("tts-speed").value); remember("sh-tts-speed", String(ttsSpeed)); applyTtsSpeed(); });
+applyTtsSpeed();
+$("tts-text").addEventListener("input", () => {
+  tts.undo = null;
+  $("tts-undo").hidden = true;
+  clearTimeout(tts.segTimer);
+  tts.segTimer = setTimeout(() => { ttsStop(); ttsSegment($("tts-text").value).catch((e) => ttsStatus(e.message)); }, 400);
+});
+function ttsSetText(text, note) {
+  ttsStop();
+  $("tts-text").value = text;
+  ttsStatus(note);
+  ttsSegment(text).catch((e) => ttsStatus(e.message));
+}
+$("tts-open").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const path = $("tts-path").value.trim();
+  if (!path) return;
+  ttsStatus(`reading ${path}…`);
+  try { const r = await api("POST", "/api/tts/file", { path }); ttsSetText(r.text, `${r.source} · ${r.text.length} characters`); }
+  catch (err) { ttsStatus(err.message); }
+});
+$("tts-upload").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  ttsStatus(`reading ${f.name}…`);
+  try {
+    const res = await fetch("/api/tts/upload?" + new URLSearchParams({ name: f.name }),
+                            { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: f });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    ttsSetText(data.text, `${data.source} · ${data.text.length} characters (not kept)`);
+  } catch (err) { ttsStatus(err.message); }
+});
+$("tts-prepare").addEventListener("click", async () => {
+  const t = $("tts-text"), mode = $("tts-mode").value;
+  const [a, b] = t.selectionStart !== t.selectionEnd ? [t.selectionStart, t.selectionEnd] : [0, t.value.length];
+  const source = t.value.slice(a, b);
+  if (!source.trim()) { toast("nothing to prepare: type, paste or open a text", true); return; }
+  if (running) { toast("the model is busy; wait for it or press Stop", true); return; }
+  ttsStop();
+  const before = t.value;
+  let out = "";
+  running = true;
+  $("tts-prepare").disabled = true;
+  setBusy(mode === "summary" ? "finding the key points" : "tidying the text");
+  ttsStatus("the model is writing…");
+  try {
+    await stream("/api/tts/prepare", { text: source, mode }, (ev) => {
+      if (ev.type === "text") { out += ev.text; t.value = before.slice(0, a) + out + before.slice(b); }
+      else if (ev.type === "status") ttsStatus(ev.text + "…");
+      else if (ev.type === "done") { out = ev.text; renderState(ev.state); }
+    });
+    t.value = before.slice(0, a) + out.trim() + before.slice(b);
+    tts.undo = before;
+    $("tts-undo").hidden = false;
+    ttsStatus(mode === "summary" ? "the key points, by the model: read them, or undo" : "tidied by the model: read it, or undo");
+  } catch (e) { t.value = before; ttsStatus(e.message); }
+  running = false;
+  $("tts-prepare").disabled = false;
+  setBusy("");
+  ttsSegment(t.value).catch((e) => ttsStatus(e.message));
+  refreshState();
+});
+$("tts-undo").addEventListener("click", () => {
+  if (tts.undo == null) return;
+  const text = tts.undo;
+  tts.undo = null;
+  $("tts-undo").hidden = true;
+  ttsSetText(text, "the original text again");
+});
+$("tts-voice").addEventListener("click", (e) => { e.preventDefault(); show("models"); });
+async function loadTts() {
+  try {
+    const st = await api("GET", "/api/speech");
+    speechState = st;
+    const s = st.settings;
+    $("tts-voice").textContent = st.tts_ready ? "⚠ no voice: set one up" : `voice: ${s.tts === "piper" ? s.piper_voice : s.tts}`;
+    $("tts-voice").title = st.tts_ready || "the voice is set in Models → Speech";
+    if (st.tts_ready && !$("tts-status").textContent) ttsStatus(st.tts_ready + " (Models → Speech)");
+  } catch (e) { ttsStatus(e.message); }
+  try {
+    const names = new Set([...relics.map((r) => r.path), ...(research ? research.library.filter((x) => x.kind !== "note").map((x) => x.source) : [])]);
+    $("tts-files").replaceChildren(...[...names].map((n) => el("option", { value: n })));
+  } catch (e) { /* only suggestions */ }
+  if (!tts.segs.length && $("tts-text").value.trim()) ttsSegment($("tts-text").value).catch(() => {});
+  else renderReading();
+}
+loaders.tts = loadTts;
