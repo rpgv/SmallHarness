@@ -27,7 +27,7 @@ ones ask you first), and runs as many model instances as your RAM allows.
 └───────────────────────────────────────────────────────────┘
 research › when does the release train leave?
 ◆ The release train leaves every Friday at noon [1].
-  A1 · refs [1] · /attach 1 keeps it in mind · /bibliography
+  A1 · refs [1] · /pin 1 keeps it in mind · /bibliography
 ```
 
 ## Install

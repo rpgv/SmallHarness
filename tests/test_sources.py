@@ -218,14 +218,14 @@ class PubMed(KeyTest):
 
 
 class IntoTheKnowledgeBase(KeyTest):
-    def test_gemini_answer_attached_then_saved(self):
+    def test_gemini_answer_pinned_then_saved(self):
         keys.put("gemini", "k-123456789")
         h = self.harness()
         r = Research(h)
         with mock.patch("urllib.request.urlopen", lambda req, timeout=0: Reply(json.dumps(GEMINI_REPLY).encode())):
             a = r.gemini("What is BamA?")
         self.assertEqual((a.kind, a.num), ("gemini", 1))
-        r.attach(1)                                                          # CAG like any answer
+        r.pin(1)                                                             # CAG like any answer
         a, res = r.save(1)
         self.assertEqual(a.saved, ".smallharness/library/gemini-what-is-bama.md")
         self.assertIn(a.saved, h.project_rag.sources)

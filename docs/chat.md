@@ -46,6 +46,25 @@ the answer so you can see them, but later messages don't carry them. Files that
 On the web, *export* on a message does the same as `/export`: pick the whole message or
 one of its code blocks, and the file.
 
+## Keeping context
+Normally each reply sees the conversation so far. Switch **context** off (the toggle
+next to the chat's title on the web, or `/context off` in the terminal) and each reply
+sees only the message it answers, with what its command lines brought in, plus:
+
+- the **pinned** messages, and
+- in a **thread**, that thread (the message replied to and the thread's replies).
+
+Nothing said earlier in the conversation reaches the model, but every message is
+still kept and shown, and you can turn context back on at any time. The default for
+all chats is set under **Settings → Context** (or `/context default on|off`), and applies
+to every chat that was not switched on its own; Alt-click the toggle to return a chat
+to the default. Before it is changed there, the default is `[chat].keep_context`
+(true).
+
+Relic chats (the *Ask* box on the Relics page, see [web.md](web.md#relics)) have their
+own default, also under **Settings → Context**, off unless set (`[relics].keep_context`);
+so does Research (see [research.md](research.md#asking)).
+
 ## Pinning (CAG)
 Pin a message (`/pin N`, or *pin* on the message) to keep it in every later prompt:
 the conversation's and every thread's. A pinned message stays in the context even

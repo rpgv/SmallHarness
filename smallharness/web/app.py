@@ -137,6 +137,14 @@ class WebApp:
         self.job: Job | None = None           # the latest background run
 
     @property
+    def runner(self):
+        """Commands run from the Relics page."""
+        if getattr(self, "_runner", None) is None:
+            from ..runner import Runner
+            self._runner = Runner(self.h.cfg.workspace, self.h.cfg["relics"])
+        return self._runner
+
+    @property
     def research(self):
         from ..research import Research
         if self._research is None:

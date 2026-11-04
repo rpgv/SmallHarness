@@ -76,6 +76,14 @@ DEFAULTS: dict[str, Any] = {
         "max_result_chars": 3000,
         "extra_dirs": [],
     },
+    "relics": {
+        "run_timeout": 300,           # seconds before a run started from the Relics page is stopped
+        "keep_context": False,        # a relic's chat (Relics page) sees only the message it answers; the web Settings sets it too
+    },
+    "chat": {
+        "keep_context": True,         # replies see the conversation so far; false: only the message they answer
+                                      # (plus pins and threads). Each chat can be switched; the web Settings sets it too.
+    },
     "plan": {
         "default_mode": "fresh",      # fresh | continuous
         "parallel": False,            # run independent tasks on several instances
@@ -112,7 +120,9 @@ DEFAULTS: dict[str, Any] = {
     "research": {
         "k": 6,                       # excerpts found per question
         "excerpt_budget": 0.5,        # max fraction of the window for the excerpts
-        "attached_budget": 0.2,       # max fraction for attached answers (CAG)
+        "pinned_budget": 0.2,         # max fraction for pinned answers (CAG)
+        "keep_context": False,        # also show the session's latest answers (Settings → Context overrides)
+        "history_budget": 0.2,        # max fraction for those answers, when keeping context
     },
     "rag": {
         # File types /index accepts, in files and whole folders.

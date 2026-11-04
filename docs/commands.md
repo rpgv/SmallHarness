@@ -8,8 +8,8 @@ the next one.
 
 | mode | plain text | commands |
 |---|---|---|
-| chat | a message (command lines first bring in tools; see [Chat](chat.md)) | `/reply` `/thread` `/main` `/pin` `/unpin` `/rewind` `/history` `/chats` `/open` `/new` `/title` `/forget` `/commands` |
-| research | a question | `/add` `/files` `/remove` `/note` `/notes` `/scope` `/find` `/bibliography` `/attach` `/detach` `/answers` `/gemini` `/save` `/pubmed` `/doi` |
+| chat | a message (command lines first bring in tools; see [Chat](chat.md)) | `/reply` `/thread` `/main` `/pin` `/unpin` `/rewind` `/history` `/chats` `/open` `/new` `/title` `/context` `/forget` `/commands` |
+| research | a question | `/add` `/files` `/remove` `/note` `/notes` `/scope` `/find` `/bibliography` `/pin` `/unpin` `/answers` `/gemini` `/save` `/pubmed` `/doi` |
 | code | a goal to plan | `/show` `/plans` `/load` `/draft` `/edit` `/expand` `/persist` `/permissions` `/run` `/tools` |
 
 In the terminal, red marks risky (type 1) tools and nothing else.

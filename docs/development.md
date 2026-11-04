@@ -15,7 +15,7 @@ python -m unittest discover -s tests    # runs against the mock backend: no mode
 | `research.py`, `context/` | research sessions, the knowledge base index and search, embeddings |
 | `notes.py`, `notemode.py` | notes, and note mode |
 | `plans.py`, `planning.py` | plans as data; creating, expanding and running them |
-| `relics.py` | the files plans wrote |
+| `relics.py`, `runner.py` | the files plans wrote, and running them from the web page |
 | `gemini.py`, `pubmed.py`, `keys.py` | outside sources on command: Gemini, PubMed, API keys |
 | `speech.py` | speech to text (Whisper, Vosk) and text to speech (Piper, Bark) |
 | `engines.py`, `models.py`, `modelinfo.py` | LiteRT-LM and Ollama: models, downloads, context size |

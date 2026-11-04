@@ -53,19 +53,38 @@ class ResearchMode(WorkspaceTest):
         r.set_scope([notes[0]["source"]])
         self.assertEqual(r.refs[r.ask("where is the office").refs[0] - 1].source, notes[0]["source"])
 
-    def test_attached_answers_are_kept_in_mind(self):
+    def test_pinned_answers_are_kept_in_mind(self):
         h, r = self.research()
         first = r.ask("when does the release train leave?")
         r.ask("when are invoices sent?")
-        self.assertNotIn("ATTACHED", self.backend.prompts[-1])           # clean by default
-        r.attach(first.num)
+        self.assertNotIn("PINNED", self.backend.prompts[-1])             # clean by default
+        self.assertNotIn("EARLIER", self.backend.prompts[-1])
+        r.pin(first.num)
         r.ask("when are invoices sent?")
         prompt = self.backend.prompts[-1]
-        self.assertIn("ATTACHED", prompt)
+        self.assertIn("PINNED", prompt)
         self.assertIn("Q: when does the release train leave?\nA: From the excerpts: see .", prompt)
-        r.detach(first.num)
+        r.unpin(first.num)
         r.ask("when are invoices sent?")
-        self.assertNotIn("ATTACHED", self.backend.prompts[-1])
+        self.assertNotIn("PINNED", self.backend.prompts[-1])
+
+    def test_keeping_context_shows_the_latest_answers(self):
+        h, r = self.research()
+        self.assertFalse(r.keep_context)                                  # off by default
+        r.ask("when does the release train leave?")
+        r.ask("when are invoices sent?")
+        h.chats.set_keep_context_for("research", True)
+        self.assertTrue(r.to_dict()["keep_context"])
+        r.pin(1)
+        r.ask("and the office?")
+        prompt = self.backend.prompts[-1]
+        earlier = prompt[prompt.index("EARLIER"):prompt.index("EXCERPTS")]
+        self.assertIn("Q: when are invoices sent?", earlier)
+        self.assertNotIn("release train", earlier)                        # pinned: shown once, above
+        h.cfg.data["research"]["history_budget"] = 0.0
+        r.ask("and the office again?")
+        self.assertNotIn("EARLIER", self.backend.prompts[-1])             # no room: left out whole
+        h.chats.set_keep_context_for("research", False)
 
     def test_remove_and_uploads(self):
         h, r = self.research()

@@ -3,7 +3,7 @@ context into a summary as it fills."""
 import json
 
 from smallharness.agent import Events
-from smallharness.chat import ChatStore, parse, tool_args
+from smallharness.chat import ChatStore, parse, relic_attachment, tool_args
 from smallharness.errors import Invalid, NotFound
 
 from helpers import WorkspaceTest
@@ -172,6 +172,85 @@ class Chat(WorkspaceTest):
         chat.send("back to the main line")
         self.assertNotIn("are they red?", self.prompt())                # threads stay out of it
         self.assertEqual(chat.to_dict()["threads"], {2: 4})
+
+    def test_context_off_sees_only_the_message_pins_and_threads(self):
+        chat = self.chat(["The code is tangerine.", "Noted.", "A fruit.", "In the thread.", "Back on."])
+        chat.send("remember: the code is tangerine")                     # 1, 2
+        chat.send("my cat is called Miso")                               # 3, 4
+        chat.pin(1)
+        chat.set_keep_context(False)
+        self.assertFalse(chat.keep_context)
+        chat.send("what is my cat called?")                              # 5, 6
+        prompt = self.prompt()
+        self.assertIn("what is my cat called?", prompt)
+        self.assertNotIn("Miso", prompt)                                  # earlier turns: not seen
+        self.assertIn("tangerine", prompt)                                # pinned: still seen
+        self.assertEqual(len(chat.messages), 6)                           # every message is still kept
+        chat.send("and in a thread?", thread=4)
+        self.assertIn("Miso", self.prompt())                              # a reply keeps its thread's context
+        chat.set_keep_context(None)                                       # back to the default: on
+        chat.send("what is my cat called?")
+        self.assertIn("Miso", self.prompt())
+        self.assertIsNone(json.loads(chat.path.read_text())["keep_context"])
+
+    def test_context_default_for_all_chats(self):
+        chat = self.chat()
+        store = self.h.chats
+        self.assertTrue(store.default_keep_context)                       # [chat].keep_context
+        store.set_default_keep_context(False)
+        self.assertFalse(chat.keep_context)                               # not switched on its own: follows it
+        own = store.new()
+        own.set_keep_context(True)
+        self.assertTrue(own.keep_context)                                 # switched on its own: keeps it
+        self.assertNotIn("settings", [c["id"] for c in store.list()])     # the default is not a chat
+        with self.assertRaises(Invalid):
+            store.load("settings")
+        h2 = self.harness(chat={"keep_context": True})
+        self.assertFalse(h2.chats.default_keep_context)                   # the saved default wins over the setting
+
+    def test_relic_chats(self):
+        self.h = self.harness(["Here:\n```py\nx = 2\n```"] * 3)
+        store = self.h.chats
+        chat = store.for_relic("tool.py")
+        self.assertEqual((chat.relic, chat.title), ("tool.py", "relic: tool.py"))
+        self.assertIs(store.for_relic("tool.py"), chat)                   # one chat per relic
+        self.assertIsNone(store.for_relic("other.py", create=False))
+        self.assertEqual([c.get("relic") for c in store.list()], ["tool.py"])
+        self.assertFalse(chat.keep_context)                               # relic chats: off unless set
+        store.set_default_keep_context(False)
+        store.set_relic_keep_context(True)
+        self.assertTrue(chat.keep_context)
+        self.assertFalse(store.default_keep_context)                      # both kept in the settings file
+        store.set_relic_keep_context(False)
+
+        text = "a = 1\nb = 2\nc = 3\n"
+        attach, meta = relic_attachment("tool.py", text, [(2, 3)])
+        self.assertEqual(meta, {"relic": "tool.py", "sections": [[2, 3]]})
+        self.assertIn("Lines 2-3 of the file tool.py", attach)
+        self.assertIn("```py\nb = 2\nc = 3\n```", attach)
+        self.assertNotIn("a = 1", attach)
+        whole, whole_meta = relic_attachment("tool.py", "s = '```'\n")
+        self.assertEqual(whole_meta, {"relic": "tool.py"})
+        self.assertIn("````py\n", whole)                                  # a longer fence than the file's
+        with self.assertRaises(Invalid):
+            relic_attachment("tool.py", text, [(3, 9)])
+        two, two_meta = relic_attachment("tool.py", text, [(3, 3), (1, 1), (1, 1)])
+        self.assertEqual(two_meta["sections"], [[1, 1], [3, 3]])          # in order, overlaps merged
+        self.assertIn("2 sections of the file tool.py", two)
+        self.assertIn("Lines 1-1:\n```py\na = 1\n```\nLines 3-3:\n```py\nc = 3\n```", two)
+        self.assertNotIn("b = 2", two)
+
+        chat.send("make b two", attach=attach, attach_meta=meta)
+        user = chat.messages[0]
+        self.assertEqual(user.text, "make b two")                         # the chat shows the question
+        self.assertIn("b = 2", user.seen)                                 # the model sees the lines too
+        self.assertIn("b = 2", self.prompt())
+        self.assertEqual(user.meta["sections"], [[2, 3]])
+        chat.send("again", attach="FIRST COPY")
+        chat.send("and again", attach="SECOND COPY")
+        self.assertIn("SECOND COPY", self.prompt())
+        self.assertNotIn("FIRST COPY", self.prompt())                     # no context: older copies left out
+        self.assertEqual(json.loads(chat.path.read_text())["relic"], "tool.py")
 
     def test_pins_reach_threads_and_outlive_folding(self):
         chat = self.chat()

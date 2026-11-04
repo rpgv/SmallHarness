@@ -240,6 +240,23 @@ async function deleteChat(id, title) {
 }
 $("chat-new").addEventListener("click", newChat);
 $("chat-delete").addEventListener("click", () => { if (chat) deleteChat(chat.id, chat.title); });
+// Keeping context, per chat: a click sets this chat; Alt-click returns it to the default.
+$("chat-context").addEventListener("click", async (e) => {
+  if (!chat || !chat.messages) { e.preventDefault(); toast("start the chat first", true); return; }
+  const value = e.altKey ? null : $("chat-context").checked;
+  try { chat = await api("PUT", `/api/chats/${chat.id}`, { keep_context: value }); renderContextToggle(); }
+  catch (err) { toast(err.message, true); }
+});
+function renderContextToggle() {
+  const on = chat ? chat.keep_context : true;
+  $("chat-context").checked = on;
+  $("chat-context").disabled = !chat;
+  $("chat-context-label").classList.toggle("off", !on);
+  $("chat-context-label").lastChild.textContent = on ? " context" : " no context";
+  $("chat-context-label").title = (on ? "on: replies see the conversation so far" :
+    "off: replies see only the message they answer, pinned messages and threads")
+    + (chat && chat.keep_context_default ? " (the default, set under Settings)" : " (set for this chat; Alt-click: back to the default)");
+}
 $("chat-title").addEventListener("change", async () => {
   const title = $("chat-title").value.trim();
   if (!chat || !title) return;
@@ -266,7 +283,12 @@ function userText(text) {
   return box;
 }
 function chatBody(m) {
-  if (m.role === "user") return [userText(m.text)];
+  if (m.role === "user") {
+    if (!m.meta.relic) return [userText(m.text)];
+    return [userText(m.text), el("div", { class: "cmsg-foot" }, el("span", { class: "scope-chip",
+      title: "the model also saw these lines of the relic, as they were then",
+      text: `with ${m.meta.relic} ` + sectionsLabel(m.meta) }))];
+  }
   if (m.kind === "tool") {
     const args = Object.entries(m.meta.args || {}).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" ");
     const cls = "tool" + (m.meta.tool && m.meta.tool.startsWith("risky_") ? " risky" : "") + (m.meta.ok ? "" : " failed");
@@ -330,6 +352,7 @@ function renderChat() {
   const has = !!chat;
   $("chat-title").value = has ? (chat.title === "New chat" && !chat.messages.length ? "" : chat.title) : "";
   $("chat-title").disabled = !has;
+  renderContextToggle();
   $("chat-delete").hidden = !has;
   const box = $("chat-messages");
   box.replaceChildren(...chatLine(0).map((m) => chatCard(m, false)));
@@ -351,8 +374,8 @@ function renderPins() {
   const pins = chat ? chat.messages.filter((m) => m.pinned) : [];
   $("chat-pins").hidden = !pins.length;
   $("chat-pins").replaceChildren(
-    el("div", { class: "attached-head", text: `Pinned: in every prompt (${pins.length})` }),
-    ...pins.map((m) => el("div", { class: "attached-item" },
+    el("div", { class: "pins-head", text: `Pinned: in every prompt (${pins.length})` }),
+    ...pins.map((m) => el("div", { class: "pins-item" },
       el("a", { href: "#", class: "grow", title: m.text, text: `#${m.num} ${m.text.split("\n")[0].slice(0, 90)}`,
                 onclick: (e) => { e.preventDefault(); focusMessage(m); } }),
       el("button", { class: "small link", text: "unpin", onclick: () => pinMessage(m.num, false) }))));
@@ -398,7 +421,8 @@ const EXT = { python: "py", py: "py", javascript: "js", js: "js", typescript: "t
               shell: "sh", json: "json", html: "html", css: "css", markdown: "md", md: "md", toml: "toml", yaml: "yaml",
               yml: "yaml", sql: "sql", c: "c", cpp: "cpp", rust: "rs", go: "go", java: "java" };
 function codeBlocks(text) {
-  return [...text.matchAll(/```([^\n`]*)\n([\s\S]*?)```/g)].map((x) => ({ lang: (x[1].trim().split(/\s+/)[0] || "").toLowerCase(), body: x[2] }));
+  return [...text.matchAll(/```([^\n`]*)\n([\s\S]*?)```/g)].map((x) => ({ lang: (x[1].trim().split(/\s+/)[0] || "").toLowerCase(), body: x[2],
+                                                                    start: x.index, end: x.index + x[0].length }));
 }
 function exportMessage(m) {
   const blocks = codeBlocks(m.text);
@@ -588,8 +612,11 @@ function renderResearch(r) {
   $("scope-line").textContent = r.scope.length ? `· questions search only the ticked ${r.scope.length === 1 ? "one" : r.scope.length}`
                                                 : "· questions search everything; tick to narrow";
   $("scope-all").hidden = !r.scope.length;
-  renderAttached(r);
+  renderPins(r);
+  $("research-context-note").hidden = !r.keep_context;
+  $("research-context-note").textContent = "Keeping context: each question also sees the latest answers (Settings → Context).";
   if (!running) renderAnswers(r);
+  if (!geminiAsking) renderGemini(r);
   renderFiles(r);
   renderNotes(r);
   renderRefs(r);
@@ -610,7 +637,7 @@ function citedText(text) {
 const speeds = {};   // answer number -> its speed line (the server does not keep timings)
 function answerCard(a) {
   const web = a.kind === "gemini";
-  return el("div", { class: "answer" + (a.attached ? " attached" : "") + (web ? " web" : "") },
+  return el("div", { class: "answer" + (a.pinned ? " pinned" : "") + (web ? " web" : "") },
     el("div", { class: "question", text: (web ? "✦ " : "") + a.question }),
     web ? el("div", { class: "cmsg-text", text: a.text }) : citedText(a.text),
     web && a.sources.length ? el("ol", { class: "sources" }, ...a.sources.map((x) =>
@@ -625,31 +652,31 @@ function answerCard(a) {
       a.saved ? el("span", { class: "muted", text: `in the knowledge base ` })
               : el("button", { class: "small secondary", text: "Save", title: "put this answer into the knowledge base",
                                onclick: () => saveAnswer(a.num) }),
-      el("button", { class: "small " + (a.attached ? "" : "secondary"), text: a.attached ? "Attached" : "Attach",
-                     title: a.attached ? "detach: later questions no longer see it"
-                                       : "attach: later questions keep this answer in mind",
-                     onclick: () => setAttached(a.num, !a.attached) })),
+      el("button", { class: "small " + (a.pinned ? "" : "secondary"), text: a.pinned ? "Pinned" : "Pin",
+                     title: a.pinned ? "unpin: later questions no longer see it"
+                                     : "pin: later questions keep this answer in mind",
+                     onclick: () => setPinned(a.num, !a.pinned) })),
     speeds[a.num] ? el("div", { class: "speed", text: speeds[a.num] }) : null);
 }
 function renderAnswers(r) {
-  const box = $("answers");
-  box.replaceChildren(...r.answers.map(answerCard));
-  if (!r.answers.length) {
+  const box = $("answers"), mine = r.answers.filter((a) => a.kind !== "gemini");
+  box.replaceChildren(...mine.map(answerCard));
+  if (!mine.length) {
     box.append(el("div", { class: "msg notice placeholder",
       text: "Ask about your files (below) and notes (left). Answers cite the excerpts they rest on." }));
   }
   box.scrollTop = box.scrollHeight;
 }
-// Attached answers (CAG), above the thread: what later questions keep in mind.
-function renderAttached(r) {
-  const attached = r.answers.filter((a) => a.attached);
-  $("attached").hidden = !attached.length;
-  $("attached").replaceChildren(
-    el("div", { class: "attached-head", text: `Kept in mind (${attached.length})` }),
-    ...attached.map((a) => el("div", { class: "attached-item" },
+// Pinned answers (CAG), above the thread: what later questions keep in mind.
+function renderPins(r) {
+  const pinned = r.answers.filter((a) => a.pinned);
+  $("research-pins").hidden = !pinned.length;
+  $("research-pins").replaceChildren(
+    el("div", { class: "pins-head", text: `Pinned: in every question (${pinned.length})` }),
+    ...pinned.map((a) => el("div", { class: "pins-item" },
       el("span", { class: "grow", title: a.text },
         el("strong", { text: `A${a.num} ` }), document.createTextNode(a.question)),
-      el("button", { class: "small link", text: "detach", onclick: () => setAttached(a.num, false) }))));
+      el("button", { class: "small link", text: "unpin", onclick: () => setPinned(a.num, false) }))));
 }
 async function saveAnswer(num) {
   setBusy("indexing");
@@ -660,22 +687,39 @@ async function saveAnswer(num) {
   } catch (e) { toast(e.message, true); }
   setBusy("");
 }
+// Gemini (its own tab): answers numbered with the others, pinned or saved like them.
+let geminiAsking = false;
+function renderGemini(r) {
+  const box = $("gemini-answers"), mine = r.answers.filter((a) => a.kind === "gemini");
+  box.replaceChildren(...mine.map(answerCard));
+  if (!mine.length) box.append(el("div", { class: "msg notice placeholder", text: "Nothing asked of Gemini yet." }));
+  box.scrollTop = box.scrollHeight;
+}
 async function askGemini(q) {
-  const box = $("answers");
-  const pending = el("div", { class: "answer pending" }, el("div", { class: "question", text: "✦ " + q }),
+  const box = $("gemini-answers");
+  for (const p of box.querySelectorAll(".placeholder")) p.remove();
+  const pending = el("div", { class: "answer pending web" }, el("div", { class: "question", text: "✦ " + q }),
                      el("div", { class: "muted", text: "asking Gemini…" }));
   box.append(pending);
   box.scrollTop = box.scrollHeight;
+  geminiAsking = true;
   $("gemini-btn").disabled = true;
-  try { renderResearch((await api("POST", "/api/research/gemini", { question: q })).research); }
-  catch (e) { pending.lastChild.textContent = e.message; pending.classList.add("failed"); }
+  let failed = false;
+  try { const r = await api("POST", "/api/research/gemini", { question: q }); geminiAsking = false; renderResearch(r.research); }
+  catch (e) { failed = true; pending.lastChild.textContent = e.message; pending.classList.add("failed"); }
+  geminiAsking = false;
   $("gemini-btn").disabled = false;
+  if (failed && !$("gemini-input").value) $("gemini-input").value = q;
 }
-$("gemini-btn").addEventListener("click", () => {
-  const q = $("ask-input").value.trim();
-  if (!q) { toast("type what to ask Gemini", true); return; }
-  $("ask-input").value = "";
+$("gemini-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = $("gemini-input").value.trim();
+  if (!q || geminiAsking) return;
+  $("gemini-input").value = "";
   askGemini(q);
+});
+$("gemini-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("gemini-form").requestSubmit(); }
 });
 
 // PubMed: open-access articles, added to the knowledge base by DOI
@@ -722,8 +766,8 @@ $("doi-form").addEventListener("submit", (e) => {
   addArticles(ids);
 });
 
-async function setAttached(num, attached) {
-  try { renderResearch(await api("PUT", `/api/research/answers/${num}/attach`, { attached })); }
+async function setPinned(num, pinned) {
+  try { renderResearch(await api("PUT", `/api/research/answers/${num}/pin`, { pinned })); }
   catch (e) { toast(e.message, true); }
 }
 
@@ -794,7 +838,7 @@ $("ask-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("ask-form").requestSubmit(); }
 });
 $("research-new").addEventListener("click", async () => {
-  if (research && research.answers.length && !confirm("Start a new session? Answers, references and attachments are cleared.")) return;
+  if (research && research.answers.length && !confirm("Start a new session? Answers, references and pins are cleared.")) return;
   try {
     for (const k of Object.keys(speeds)) delete speeds[k];
     renderResearch(await api("POST", "/api/research/new"));
@@ -1370,7 +1414,106 @@ RUNS.run = { busy: "running the plan", after: afterPlanRun,
   } };
 
 // ================================================================= relics
-// The files plans wrote: listed under the tabs, opened and edited here.
+// The files plans wrote: listed under the tabs, opened, edited and run here.
+
+// Syntax highlighting: a highlighted copy of the text sits under the (transparent)
+// editor, kept in step as you type and scroll. Small and dependency-free: comments,
+// strings, numbers, keywords, and names being called, by file type.
+const KEYWORDS = {
+  py: "False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case self print len range",
+  js: "async await break case catch class const continue debugger default delete do else export extends false finally for from function if import in instanceof let new null of return static super switch this throw true try typeof undefined var void while with yield console",
+  sh: "if then else elif fi for while until do done case esac function in return exit local export readonly echo cd set unset source shift true false",
+  c: "auto break case char const continue default do double else enum extern float for goto if inline int long register return short signed sizeof static struct switch typedef union unsigned void volatile while bool true false NULL class public private protected namespace template typename new delete this virtual override nullptr using std",
+  go: "break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var nil true false",
+  rs: "as async await break const continue crate else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while",
+  rb: "alias and begin break case class def defined do else elsif end ensure false for if in module next nil not or redo rescue retry return self super then true undef unless until when while yield puts require",
+  sql: "select from where insert into values update set delete create table drop alter add primary key foreign references not null and or as join left right inner outer on group by order having limit offset distinct union all index view is in like between case when then else end",
+  lua: "and break do else elseif end false for function goto if in local nil not or repeat return then true until while",
+  java: "abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for if implements import instanceof int interface long native new null package private protected public return short static super switch this throw throws try void volatile while true false var",
+  toml: "true false", json: "true false null", yaml: "true false null yes no",
+};
+const LANG = { py: "py", pyw: "py", js: "js", mjs: "js", cjs: "js", ts: "js", tsx: "js", jsx: "js", sh: "sh", bash: "sh",
+  zsh: "sh", c: "c", h: "c", cpp: "c", cc: "c", hpp: "c", cs: "c", swift: "c", kt: "java", go: "go", rs: "rs", rb: "rb", sql: "sql",
+  lua: "lua", java: "java", toml: "toml", ini: "toml", cfg: "toml", json: "json", yaml: "yaml", yml: "yaml", r: "py",
+  html: "html", htm: "html", xml: "html", svg: "html", md: "md", css: "css" };
+const HASH_COMMENTS = new Set(["py", "sh", "rb", "toml", "yaml"]);
+const highlighters = {};
+function highlighter(lang) {
+  if (highlighters[lang]) return highlighters[lang];
+  const parts = [];
+  if (lang === "html") {
+    parts.push(["c", "<!--[\\s\\S]*?-->"], ["s", `"[^"]*"|'[^']*'`], ["k", "</?[A-Za-z][\\w:-]*|/?>"], ["f", "\\b[\\w:-]+(?==)"]);
+  } else if (lang === "md") {
+    parts.push(["s", "```[\\s\\S]*?```|`[^`\\n]*`"], ["k", "^#{1,6} .*$"], ["f", "\\*\\*[^*\\n]+\\*\\*|\\[[^\\]\\n]+\\]\\([^)\\n]+\\)"],
+               ["c", "^>.*$"], ["n", "^\\s*(?:[-*+]|\\d+\\.)(?= )"]);
+  } else if (lang === "css") {
+    parts.push(["c", "/\\*[\\s\\S]*?\\*/"], ["s", `"[^"\\n]*"|'[^'\\n]*'`],
+               ["n", "#[0-9a-fA-F]{3,8}\\b|-?\\d+\\.?\\d*(?:px|em|rem|%|vh|vw|s|ms)?\\b"], ["k", "@[\\w-]+|![\\w]+"], ["f", "[\\w-]+(?=\\s*:)"]);
+  } else {
+    const c = [];
+    if (lang === "c") c.push("^\\s*#\\s*\\w+.*$");
+    if (HASH_COMMENTS.has(lang)) c.push("#.*$");
+    if (["js", "c", "go", "rs", "java"].includes(lang)) c.push("//.*$", "/\\*[\\s\\S]*?\\*/");
+    if (lang === "sql" || lang === "lua") c.push("--.*$");
+    if (c.length) parts.push(["c", c.join("|")]);
+    const strs = [`"(?:\\\\.|[^"\\\\\\n])*"`, `'(?:\\\\.|[^'\\\\\\n])*'`];
+    if (lang === "py") strs.unshift(`[rbfuRBFU]{0,2}"""[\\s\\S]*?"""`, `[rbfuRBFU]{0,2}'''[\\s\\S]*?'''`);
+    if (lang === "js" || lang === "go") strs.push("`(?:\\\\.|[^`\\\\])*`");
+    if (lang === "sh") strs.push("\\$\\{?\\w+\\}?");
+    parts.push(["s", strs.join("|")]);
+    if (lang === "py") parts.push(["f", "@[\\w.]+"]);
+    parts.push(["n", "\\b(?:0[xXbBoO][\\da-fA-F_]+|\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)\\b"]);
+    const kw = (KEYWORDS[lang] || "").split(" ").filter(Boolean);
+    if (kw.length) parts.push(["k", `\\b(?:${kw.join("|")})\\b`]);
+    if (["toml", "json", "yaml"].includes(lang)) parts.push(["f", "^\\s*[\\w.-]+(?=\\s*[:=])"]);
+    else parts.push(["f", "\\b[A-Za-z_]\\w*(?=\\s*\\()"]);
+  }
+  const names = parts.map(([n]) => n);
+  return (highlighters[lang] = { names, re: new RegExp(parts.map(([, r]) => `(${r})`).join("|"), "gm" + (lang === "sql" ? "i" : "")) });
+}
+const escapeHtml = (t) => t.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+function highlight(text, lang) {
+  if (!lang || text.length > 300000) return escapeHtml(text);
+  const { names, re } = highlighter(lang);
+  let out = "", last = 0;
+  for (const m of text.matchAll(re)) {
+    if (!m[0]) continue;
+    const g = m.slice(1).findIndex((x) => x !== undefined);
+    out += escapeHtml(text.slice(last, m.index)) + `<span class="t-${names[g]}">${escapeHtml(m[0])}</span>`;
+    last = m.index + m[0].length;
+  }
+  return out + escapeHtml(text.slice(last));
+}
+let relicLang = "", hlQueued = false;
+function renderHighlight() {
+  hlQueued = false;
+  // a trailing newline needs a character after it, or the last line is not drawn
+  const text = $("relic-text").value;
+  $("relic-hl").firstChild.innerHTML = highlight(text, relicLang) + "\n ";
+  renderLineNumbers(text);
+  syncScroll();
+}
+let lineCount = 0;
+function renderLineNumbers(text) {
+  const n = text.split("\n").length;
+  if (n === lineCount) return;
+  lineCount = n;
+  $("relic-wrap").style.setProperty("--gutter", `${String(n).length + 2}ch`);
+  $("relic-ln").textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n") + "\n ";
+}
+function queueHighlight() { if (!hlQueued) { hlQueued = true; requestAnimationFrame(renderHighlight); } }
+function syncScroll() {
+  const t = $("relic-text");
+  $("relic-hl").scrollTop = $("relic-ln").scrollTop = t.scrollTop;
+  $("relic-hl").scrollLeft = t.scrollLeft;
+}
+$("relic-text").addEventListener("scroll", syncScroll);
+$("relic-text").addEventListener("keydown", (e) => {          // Tab indents instead of leaving the editor
+  if (e.key !== "Tab" || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+  e.preventDefault();
+  document.execCommand("insertText", false, "    ");
+});
+new ResizeObserver(syncScroll).observe($("relic-text"));
 const RELICS_IN_NAV = 12;
 let relics = [], relicPath = null, relicDirty = false;
 const relicBy = (by) => by.map((b) => b.replace(":", " ")).join(", ");
@@ -1407,15 +1550,67 @@ async function openRelic(path, force = false) {
   $("relic-meta").textContent = r ? relicBy(r.by) : "";
   $("relic-note").textContent = "Edits are written to the file when you save. Ctrl+S saves.";
   $("relic-status").textContent = "";
+  relicLang = LANG[(path.includes(".") ? path.split(".").pop() : "").toLowerCase()] || "";
   try {
     $("relic-text").value = (await api("GET", "/api/relics/file?" + new URLSearchParams({ path }))).text;
     $("relic-text").disabled = $("relic-save").disabled = false;
+    const first = $("relic-text").value.split("\n")[0];
+    if (!relicLang && first.startsWith("#!")) relicLang = /python/.test(first) ? "py" : /node/.test(first) ? "js" : "sh";
   } catch (e) {
     $("relic-text").value = "";
     $("relic-text").disabled = $("relic-save").disabled = true;
     $("relic-status").textContent = e.message;
   }
+  $("relic-text").scrollTop = $("relic-text").scrollLeft = 0;
+  renderHighlight();
+  loadRelicChat(path);
+  if (!relicRun) {
+    try { $("relic-cmd").value = (await api("GET", "/api/relics/command?" + new URLSearchParams({ path }))).command; }
+    catch (e) { $("relic-cmd").value = ""; }
+  }
 }
+
+// Running: the suggested command (or your own) runs in the workspace; output streams below.
+let relicRun = null;
+$("relic-run-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const command = $("relic-cmd").value.trim();
+  if (!command || relicRun) return;
+  if (relicDirty) await saveRelic();
+  const out = $("relic-out"), status = $("relic-run-status");
+  $("relic-out-wrap").hidden = false;
+  out.textContent = "";
+  status.textContent = `$ ${command}  ·  running…`;
+  status.className = "muted grow";
+  $("relic-run").disabled = true;
+  $("relic-stop").hidden = false;
+  relicRun = { id: null };
+  try {
+    await stream("/api/relics/run", { command }, (ev) => {
+      if (ev.type === "start") relicRun.id = ev.id;
+      else if (ev.type === "output") {
+        const atEnd = out.scrollTop + out.clientHeight >= out.scrollHeight - 4;
+        out.textContent += ev.text;
+        if (atEnd) out.scrollTop = out.scrollHeight;
+      } else if (ev.type === "done") {
+        const good = ev.code === 0 && !ev.stopped;
+        status.textContent = `$ ${command}  ·  ${ev.stopped || "exit code " + ev.code} · ${ev.seconds} s`;
+        status.className = "grow " + (good ? "ok" : "error");
+        if (!out.textContent) out.textContent = "(no output)";
+      }
+    });
+  } catch (err) { status.textContent = `$ ${command}  ·  ${err.message}`; status.className = "grow error"; }
+  relicRun = null;
+  $("relic-run").disabled = false;
+  $("relic-stop").hidden = true;
+  loadRelics();
+});
+$("relic-stop").addEventListener("click", async () => {
+  if (relicRun && relicRun.id) {
+    try { await api("POST", "/api/relics/stop", { id: relicRun.id }); } catch (e) { toast(e.message, true); }
+  }
+});
+$("relic-out-clear").addEventListener("click", () => { $("relic-out").textContent = ""; $("relic-out-wrap").hidden = true; });
 async function saveRelic() {
   if (!relicPath || $("relic-save").disabled) return;
   try {
@@ -1438,7 +1633,241 @@ async function forgetRelic(path) {
     renderRelics();
   } catch (e) { toast(e.message, true); }
 }
-$("relic-text").addEventListener("input", () => { relicDirty = true; $("relic-status").textContent = "unsaved"; });
+$("relic-text").addEventListener("input", () => { relicDirty = true; $("relic-status").textContent = "unsaved"; queueHighlight(); });
+
+// Asking about a relic: its own chat. Each message carries the selected lines, or the
+// whole file, as it is in the editor; Apply puts a code block from the answer back there.
+let relicChat = null, relicPending = null, relicAsking = false;
+let relicConvoOpen = true;
+try { relicConvoOpen = localStorage.getItem("relic-convo") !== "closed"; } catch (e) { /* no storage */ }
+const RELIC_LARGE = 24000;               // characters: past this, suggest selecting lines
+function lineAt(text, offset) { let n = 1; for (let i = 0; i < offset; i++) if (text.charCodeAt(i) === 10) n++; return n; }
+// The selected lines [first, last] (from 1), or null when nothing is selected.
+function relicSelection() {
+  const t = $("relic-text"), a = t.selectionStart, b = t.selectionEnd;
+  if (a === b) return null;
+  const v = t.value;
+  const first = lineAt(v, a);
+  let last = lineAt(v, b);
+  if (last > first && v[b - 1] === "\n") last--;       // a selection ending at a line start does not take that line
+  return [first, last];
+}
+// Sections kept with "+ section", and the selection: a message carries all of them
+// (in order, overlaps merged), or the whole file when there are none.
+let relicScope = null, relicSections = [], relicSectionsFor = null;
+const lineSpan = (x) => `${x[0]}–${x[1]}`;
+function mergeSections(list) {
+  const out = [];
+  for (const [a, b] of [...list].sort((x, y) => x[0] - y[0] || x[1] - y[1])) {
+    if (out.length && a <= out[out.length - 1][1]) out[out.length - 1][1] = Math.max(out[out.length - 1][1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+function relicParts() { return mergeSections(relicSections.concat(relicScope ? [relicScope] : [])); }
+function renderRelicScope() {
+  const v = $("relic-text").value, lines = v.split("\n").length, label = $("relic-scope");
+  if (document.activeElement === $("relic-text") || !$("relic-ask").matches(":focus")) relicScope = relicSelection();
+  const parts = relicParts();
+  label.classList.toggle("relic-scope-warn", !parts.length && v.length > RELIC_LARGE);
+  label.textContent = parts.length ? `with lines ${parts.map(lineSpan).join(", ")}` :
+    `with the whole file (${lines} lines)` + (v.length > RELIC_LARGE ? ": large for a small model; select lines to send less" : "");
+  $("relic-add-section").disabled = !relicScope;
+  const chips = $("relic-sections");
+  chips.hidden = !relicSections.length;
+  chips.replaceChildren(...relicSections.map((x, i) => el("span", { class: "file-chip" },
+    el("label", { text: `L${lineSpan(x)}`, title: "select these lines in the editor",
+                  onclick: () => selectLines(x) }),
+    el("button", { class: "small link", text: "×", title: "drop this section",
+                   onclick: () => { relicSections.splice(i, 1); renderRelicScope(); } }))),
+    relicSections.length > 1 ? el("button", { class: "small link", text: "clear",
+      onclick: () => { relicSections = []; renderRelicScope(); } }) : "");
+}
+function lineStarts(v) {
+  const starts = [0];
+  for (let i = 0; i < v.length; i++) if (v.charCodeAt(i) === 10) starts.push(i + 1);
+  return starts;
+}
+function selectLines([a, b]) {
+  const t = $("relic-text"), starts = lineStarts(t.value);
+  if (b > starts.length) return;
+  t.focus();
+  t.setSelectionRange(starts[a - 1], b < starts.length ? starts[b] - 1 : t.value.length);
+  renderRelicScope();
+}
+$("relic-add-section").addEventListener("click", () => {
+  const sel = relicSelection();
+  if (!sel) { toast("select lines in the editor first", true); return; }
+  relicSections = mergeSections(relicSections.concat([sel]));
+  const t = $("relic-text");
+  t.focus();
+  t.setSelectionRange(t.selectionEnd, t.selectionEnd);        // kept: select the next section
+  renderRelicScope();
+});
+for (const ev of ["select", "keyup", "mouseup", "input", "focus"]) $("relic-text").addEventListener(ev, renderRelicScope);
+
+async function loadRelicChat(path) {
+  relicPending = null;
+  if (path !== relicSectionsFor) { relicSections = []; relicSectionsFor = path; }
+  try {
+    const r = await api("GET", "/api/relics/chat?" + new URLSearchParams({ path }));
+    if (path !== relicPath) return;
+    relicChat = r.chat;
+  } catch (e) { relicChat = null; }
+  renderRelicConvo();
+  renderRelicScope();
+}
+// The sections a reply's code blocks replace: those its question carried ([[a, b], …]),
+// or null (the whole file). Applying a block shifts the sections after it (kept per question).
+const shifted = {};
+function replySections(m) {
+  const asked = relicChat.messages.filter((x) => x.thread === 0 && x.role === "user" && x.num < m.num).pop();
+  if (!asked || !asked.meta.relic) return null;
+  const key = `${relicChat.id}:${asked.num}`;
+  if (!shifted[key]) {
+    const secs = asked.meta.sections || (asked.meta.lines ? [asked.meta.lines] : null);
+    if (!secs) return null;
+    shifted[key] = secs.map((x) => [...x]);
+  }
+  return shifted[key];
+}
+function sectionsLabel(meta) {
+  const secs = meta.sections || (meta.lines ? [meta.lines] : null);
+  return secs ? secs.map((x) => "L" + lineSpan(x)).join(", ") : "whole file";
+}
+// Which section a code block is for: the "Lines a-b:" label just before it, else its place.
+function blockTarget(text, blocks, i, secs) {
+  const before = text.slice(i ? blocks[i - 1].end : 0, blocks[i].start);
+  const m = [...before.matchAll(/lines?\s+(\d+)\s*(?:-|–|to)\s*(\d+)/gi)].pop();
+  if (m) {
+    const k = secs.findIndex((x) => x[0] === Number(m[1]) && x[1] === Number(m[2]));
+    if (k >= 0) return k;
+  }
+  return Math.min(i, secs.length - 1);
+}
+function relicCard(m) {
+  const head = el("div", { class: "cmsg-head" }, el("span", { class: "cmsg-num", text: `#${m.num}` }),
+    el("span", { class: "who", text: who(m) }));
+  if (m.role === "user") {
+    if (m.meta.relic) head.append(el("span", { class: "scope-chip", text: sectionsLabel(m.meta) }));
+    return el("div", { class: "cmsg user" }, head, userText(m.text));
+  }
+  const card = el("div", { class: `cmsg ${m.role} ${m.kind}` }, head, el("div", { class: "cmsg-text", text: m.text }));
+  if (m.role === "assistant") {
+    const blocks = codeBlocks(m.text), secs = replySections(m);
+    if (blocks.length) card.append(el("div", { class: "apply-row" }, ...blocks.map((b, i) => applyControl(m, blocks, i, secs))));
+  }
+  return card;
+}
+function renderRelicConvo() {
+  const msgs = relicChat ? relicChat.messages.filter((m) => m.thread === 0) : [];
+  const box = $("relic-convo"), list = $("relic-convo-list");
+  box.hidden = !msgs.length && !relicPending;
+  $("relic-convo-toggle").textContent = `${relicConvoOpen ? "▾" : "▸"} Conversation (${msgs.length})` +
+    (relicChat && !relicChat.keep_context ? " · each message on its own (Settings → Context)" : "");
+  list.hidden = !relicConvoOpen;
+  $("relic-open-chat").hidden = !relicChat;
+  list.replaceChildren(...msgs.map(relicCard));
+  if (relicPending) list.append(el("div", { class: "cmsg assistant pending" },
+    el("div", { class: "cmsg-head" }, el("span", { class: "who", text: "model" })),
+    el("div", { class: "cmsg-text", text: relicPending.text || "…" })));
+  list.scrollTop = list.scrollHeight;
+}
+$("relic-convo-toggle").addEventListener("click", () => {
+  relicConvoOpen = !relicConvoOpen;
+  try { localStorage.setItem("relic-convo", relicConvoOpen ? "open" : "closed"); } catch (e) { /* no storage */ }
+  renderRelicConvo();
+});
+$("relic-open-chat").addEventListener("click", (e) => {
+  e.preventDefault();
+  if (!relicChat) return;
+  show("chat");
+  openChat(relicChat.id);
+});
+// One code block's Apply: to the whole file, its section, or (several sections) a section picked.
+function applyControl(m, blocks, i, secs) {
+  const name = blocks.length > 1 ? `Apply block ${i + 1}` : "Apply";
+  const note = "in the editor with this code block (not saved; Ctrl+Z undoes it)";
+  if (!secs) return el("button", { class: "small secondary", text: name, title: `replace the whole file ${note}`,
+                                   onclick: () => applyBlock(blocks[i].body, null) });
+  if (secs.length === 1) return el("button", { class: "small secondary", text: name, title: `replace lines ${lineSpan(secs[0])} ${note}`,
+                                               onclick: () => applyBlock(blocks[i].body, secs, 0) });
+  const pick = el("select", { class: "small", title: "the section this block replaces" },
+    ...secs.map((x, k) => el("option", { value: String(k), text: `lines ${lineSpan(x)}` })));
+  pick.value = String(blockTarget(m.text, blocks, i, secs));
+  return el("span", { class: "apply-pick" },
+    el("button", { class: "small secondary", text: name, title: `replace the section picked ${note}`,
+                   onclick: () => { applyBlock(blocks[i].body, secs, Number(pick.value)); renderRelicConvo(); } }), pick);
+}
+// Replace section k of `secs` (or everything) in the editor, as typing would: Ctrl+Z
+// undoes it. The sections after it, and the kept ones, move with the lines.
+function applyBlock(body, secs, k) {
+  const t = $("relic-text"), v = t.value;
+  let code = body.replace(/\n$/, ""), from = 0, to = v.length;
+  if (secs) {
+    const [a, b] = secs[k], starts = lineStarts(v);
+    if (b > starts.length) { toast(`the editor has only ${starts.length} lines now`, true); return; }
+    from = starts[a - 1];
+    to = b < starts.length ? starts[b] - 1 : v.length;
+    const delta = code.split("\n").length - (b - a + 1);
+    const move = (x) => { if (x[0] > b) { x[0] += delta; x[1] += delta; } };
+    for (const x of relicSections) { if (x[0] === a && x[1] === b) x[1] += delta; else move(x); }
+    secs.forEach((x, j) => { if (j === k) x[1] += delta; else move(x); });
+  } else if (v.endsWith("\n")) code += "\n";
+  t.focus();
+  t.setSelectionRange(from, to);
+  if (!document.execCommand("insertText", false, code)) t.setRangeText(code, from, to, "end");
+  t.setSelectionRange(from, from + code.length);
+  relicDirty = true;
+  $("relic-status").textContent = "unsaved: applied from the answer";
+  renderHighlight();
+  renderRelicScope();
+}
+$("relic-ask-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("relic-ask").value.trim(), path = relicPath;
+  if (!text || !path || relicAsking) return;
+  if (running) { toast("the model is busy; wait for it or press Stop", true); return; }
+  const parts = relicParts();
+  const body = { path, text, content: $("relic-text").value };
+  if (parts.length) body.sections = parts;
+  $("relic-ask").value = "";
+  relicAsking = true;
+  $("relic-ask-send").disabled = true;
+  live = { id: null, kind: "chat", target: relicChat ? relicChat.id : "" };
+  setRunning(true);
+  setBusy("answering about a relic");
+  relicPending = { text: "" };
+  renderRelicConvo();
+  const here = () => relicPath === path;
+  const error = await followJob((cb) => stream("/api/relics/chat", body, cb), (ev) => {
+    if (!here()) return;
+    if (ev.type === "message") {
+      if (!relicChat) relicChat = { id: "", messages: [], keep_context: false };
+      relicChat.messages = relicChat.messages.filter((m) => m.num !== ev.message.num).concat([ev.message]);
+      if (ev.message.role !== "user") relicPending = null;
+      renderRelicConvo();
+    } else if (ev.type === "text") {
+      if (!relicPending) relicPending = { text: "" };
+      relicPending.text += ev.text;
+      const node = $("relic-convo-list").querySelector(".pending .cmsg-text");
+      if (node) { node.textContent = relicPending.text; $("relic-convo-list").scrollTop = $("relic-convo-list").scrollHeight; }
+      else renderRelicConvo();
+    } else if (ev.type === "done") { relicChat = ev.chat; renderState(ev.state); }
+    else if (ev.type === "stopped") renderState(ev.state);
+  });
+  relicPending = null;
+  live = null;
+  relicAsking = false;
+  $("relic-ask-send").disabled = false;
+  setRunning(false);
+  if (error) { toast(error, true); if (here() && !$("relic-ask").value) $("relic-ask").value = text; }
+  if (here()) await loadRelicChat(path);
+  refreshState();
+});
+$("relic-ask").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("relic-ask-form").requestSubmit(); }
+});
 $("relic-text").addEventListener("keydown", (e) => {
   if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveRelic(); }
 });
@@ -1734,7 +2163,35 @@ async function loadKeys() {
     }));
   } catch (e) { toast(e.message, true); }
 }
-loaders.settings = () => { refreshState(); loadSettings(); loadTools(); loadKeys(); };
+async function loadChatDefault() {
+  try {
+    const r = await api("GET", "/api/chats");
+    $("default-context").checked = r.keep_context;
+    $("relic-context").checked = r.relic_keep_context;
+    $("research-context").checked = r.research_keep_context;
+  } catch (e) { toast(e.message, true); }
+}
+$("research-context").addEventListener("change", async (e) => {
+  try {
+    const r = await api("PUT", "/api/chats/settings", { research_keep_context: e.target.checked });
+    toast(r.research_keep_context ? "research questions see the latest answers" : "research questions see only their excerpts and pins");
+    if (research) loadResearch();
+  } catch (err) { toast(err.message, true); }
+});
+$("relic-context").addEventListener("change", async (e) => {
+  try {
+    const r = await api("PUT", "/api/chats/settings", { relic_keep_context: e.target.checked });
+    toast(r.relic_keep_context ? "relic chats keep context" : "relic chats keep no context");
+  } catch (err) { toast(err.message, true); }
+});
+$("default-context").addEventListener("change", async (e) => {
+  try {
+    const r = await api("PUT", "/api/chats/settings", { keep_context: e.target.checked });
+    toast(r.keep_context ? "chats keep context by default" : "chats keep no context by default");
+    if (chat) { chat = await api("GET", `/api/chats/${chat.id}`); renderChat(); }
+  } catch (err) { toast(err.message, true); }
+});
+loaders.settings = () => { refreshState(); loadSettings(); loadTools(); loadKeys(); loadChatDefault(); };
 $("config-filter").addEventListener("input", () => { clearTimeout(filterTimer); filterTimer = setTimeout(loadSettings, 200); });
 $("config-changed").addEventListener("change", loadSettings);
 $("config-save").addEventListener("click", async () => {
@@ -1756,5 +2213,5 @@ $("config-save").addEventListener("click", async () => {
 refreshState();
 loadRelics();
 show(["chat", "research", "notes", "code", "relics", "models", "settings"].includes(recall("sh-view", "")) ? recall("sh-view", "") : "chat");
-showPane(recall("sh-pane", "") === "bibliography" ? "bibliography" : "ask");
+showPane(["bibliography", "gemini"].includes(recall("sh-pane", "")) ? recall("sh-pane", "") : "ask");
 setInterval(() => { if (!document.hidden && !running) refreshState(); }, 5000);

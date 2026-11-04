@@ -224,6 +224,9 @@ def serve_web(h: Harness, host: str, port: int, open_browser: bool = True, load:
     except KeyboardInterrupt:
         print(ui.dim("\n  stopped"))
     finally:
+        runner = getattr(server.RequestHandlerClass.app, "_runner", None)
+        if runner:                     # commands started from the Relics page end with the server
+            runner.stop_all()
         server.server_close()
     return 0
 

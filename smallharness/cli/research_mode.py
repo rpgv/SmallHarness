@@ -17,9 +17,9 @@ HELP = [
     ("/scope [SOURCE …|all]", "limit questions to some files, folders or notes"),
     ("/find WORDS", "the excerpts a question would get, without asking the model"),
     ("/bibliography [N]", "the references [n] so far, or reference N in full"),
-    ("/attach N, /detach N", "keep answer N in the context of later questions (CAG), or not"),
-    ("/answers", "this session's answers; ◆ marks the attached ones"),
-    ("/gemini QUESTION", "ask Gemini, a larger model (only the question is sent); attach or /save the answer"),
+    ("/pin N, /unpin N", "keep answer N in the context of later questions (CAG), or not"),
+    ("/answers", "this session's answers; ◆ marks the pinned ones"),
+    ("/gemini QUESTION", "ask Gemini, a larger model (only the question is sent); /pin or /save the answer"),
     ("/save N [NAME]", "put answer N (a Gemini answer, say) into the knowledge base"),
     ("/pubmed WORDS", "open-access articles in PubMed Central"),
     ("/doi DOI|PMCID|PMID|N …", "put articles into the knowledge base (N: from the last /pubmed)"),
@@ -56,7 +56,7 @@ class ResearchShell(Shell):
             print(ui.accent("◆ ") + answer.text)
         refs = " ".join(f"[{n}]" for n in answer.refs) or "none"
         scope = f" · scope {', '.join(answer.scope)}" if answer.scope else ""
-        print(ui.dim(f"  A{answer.num} · refs {refs}{scope} · /attach {answer.num} keeps it in mind · /bibliography"))
+        print(ui.dim(f"  A{answer.num} · refs {refs}{scope} · /pin {answer.num} keeps it in mind · /bibliography"))
 
     def cmd_find(self, arg):
         if not arg:
@@ -137,21 +137,23 @@ class ResearchShell(Shell):
             print(f"  {ui.sky(f'[{r.num}]')} {r.cite()}  " + ui.dim(" ".join(r.text.split())[:80]))
         print(ui.dim(f"  in full: /bibliography N, or {self.r.bibliography_path}"))
 
-    def cmd_attach(self, arg):
+    def cmd_pin(self, arg):
         for n in _numbers(arg):
-            a = self.r.attach(n)
-            print(ui.ok(f"  ✓ A{a.num} attached: later questions keep it in mind"))
+            a = self.r.pin(n)
+            print(ui.ok(f"  ✓ A{a.num} pinned: later questions keep it in mind"))
 
-    def cmd_detach(self, arg):
+    def cmd_unpin(self, arg):
         for n in _numbers(arg):
-            a = self.r.detach(n)
-            print(ui.ok(f"  ✓ A{a.num} detached"))
+            a = self.r.unpin(n)
+            print(ui.ok(f"  ✓ A{a.num} unpinned"))
+
+    cmd_attach, cmd_detach = cmd_pin, cmd_unpin      # their old names
 
     def cmd_answers(self, _):
         if not self.r.answers:
             print(ui.dim("  no answers yet"))
         for a in self.r.answers:
-            mark = ui.accent("◆") if a.attached else " "
+            mark = ui.accent("◆") if a.pinned else " "
             print(f"  {mark} A{a.num} {a.question}\n      " + ui.dim(" ".join(a.text.split())[:110]))
 
 
@@ -165,7 +167,7 @@ class ResearchShell(Shell):
         print(ui.accent("◆ ") + a.text)
         for i, x in enumerate(a.sources, 1):
             print(ui.dim(f"  {i}. {x['title']}  {x['url']}"))
-        print(ui.dim(f"  A{a.num} · {a.model} · /attach {a.num} keeps it in mind · /save {a.num} puts it in the knowledge base"))
+        print(ui.dim(f"  A{a.num} · {a.model} · /pin {a.num} keeps it in mind · /save {a.num} puts it in the knowledge base"))
 
     def cmd_save(self, arg):
         words = arg.split()
@@ -209,5 +211,5 @@ def _numbers(arg: str) -> list[int]:
         if word.isdigit():
             nums.append(int(word))
     if not nums:
-        raise ValueError("give an answer number, e.g. /attach 2")
+        raise ValueError("give an answer number, e.g. /pin 2")
     return nums
