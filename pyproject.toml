@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smallharness"
-version = "4.1.0"
+version = "4.1.2"
 description = "A rigid harness that offloads context, tool and plan management from small local models (LiteRT-LM)."
 readme = "README.md"
 requires-python = ">=3.11"
 # The harness itself is standard library only; each extra adds one capability.
-dependencies = []
+dependencies = [
+    "rich>=15.0.0",
+]
 
 [project.optional-dependencies]
 litert = ["litert-lm>=0.18.1"]     # the `litert-lm` CLI (`litert-lm serve`) and its Python API

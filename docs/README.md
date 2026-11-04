@@ -6,7 +6,7 @@ go into detail.
 **Using it**
 - [Chat](chat.md): talking with the model, commands that bring in tools and modes,
   pins, threads, rewinding, and how the context is kept small.
-- [Research](research.md): the knowledge base, asking, references, attaching, notes,
+- [Research](research.md): the knowledge base, asking, references, pinning, notes,
   and how searching works.
 - [Code](code.md): creating, expanding, editing and running plans.
 - [Web interface](web.md): every tab, Relics, and how the local server is protected.

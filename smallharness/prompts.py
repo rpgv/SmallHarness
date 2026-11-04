@@ -28,12 +28,17 @@ CHAT_THREAD = "This is a thread on message #{num}, shown first. Keep to it."
 RESEARCH_SYSTEM = ("Answer only from the excerpts. After each claim put the number of the excerpt it "
                    "comes from, like [3]. If the excerpts do not answer the question, say so.")
 
-RESEARCH = """{attached}EXCERPTS:
+RESEARCH = """{pinned}{earlier}EXCERPTS:
 {excerpts}
 
 QUESTION: {question}"""
 
-ATTACHED = """ATTACHED (earlier answers you were asked to keep in mind):
+PINNED = """PINNED (earlier answers you were asked to keep in mind):
+{answers}
+
+"""
+
+EARLIER = """EARLIER IN THIS SESSION (the latest questions and answers before this one):
 {answers}
 
 """

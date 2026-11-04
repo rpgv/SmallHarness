@@ -97,7 +97,7 @@ class Web(unittest.TestCase):
         self.assertNotIn("note:1", {x["source"] for x in r["library"]})
         self.assertFalse(self.req("GET", "/api/state")[1]["model"]["loaded"])
 
-    def test_asking_cites_and_attaches(self):
+    def test_asking_cites_and_pins(self):
         self.req("POST", "/api/research/files", {"path": "readme.txt"})
         _, events = self.req("POST", "/api/research/ask", {"question": "what is the launch code?"})
         kinds = [e["type"] for e in events]
@@ -107,13 +107,20 @@ class Web(unittest.TestCase):
         self.assertEqual(done["answer"]["text"], "From the excerpts: see [1].")
         self.assertEqual(done["answer"]["refs"], [1])
         self.assertTrue(Path(done["research"]["bibliography"]).is_file())
-        self.assertNotIn("ATTACHED", self.backend.prompts[-1])
-        _, r = self.req("PUT", "/api/research/answers/1/attach", {"attached": True})
-        self.assertTrue(r["answers"][0]["attached"])
+        self.assertNotIn("PINNED", self.backend.prompts[-1])
+        self.assertFalse(done["research"]["keep_context"])
+        _, r = self.req("PUT", "/api/research/answers/1/pin", {"pinned": True})
+        self.assertTrue(r["answers"][0]["pinned"])
         self.req("POST", "/api/research/ask", {"question": "and the launch code again?"})
-        self.assertIn("ATTACHED", self.backend.prompts[-1])
-        self.req("PUT", "/api/research/answers/1/attach", {"attached": False})
-        self.assertEqual(self.req("PUT", "/api/research/answers/9/attach", {})[0], 404)
+        self.assertIn("PINNED", self.backend.prompts[-1])
+        self.req("PUT", "/api/research/answers/1/pin", {"pinned": False})
+        self.assertEqual(self.req("PUT", "/api/research/answers/9/pin", {})[0], 404)
+        _, s = self.req("PUT", "/api/chats/settings", {"research_keep_context": True})
+        self.assertTrue(s["research_keep_context"])
+        self.req("POST", "/api/research/ask", {"question": "the launch code, once more?"})
+        self.assertIn("EARLIER IN THIS SESSION", self.backend.prompts[-1])
+        self.assertTrue(self.req("GET", "/api/research")[1]["keep_context"])
+        self.req("PUT", "/api/chats/settings", {"research_keep_context": False})
         _, fresh = self.req("POST", "/api/research/new")
         self.assertEqual((fresh["answers"], fresh["references"]), ([], []))
 
@@ -124,6 +131,55 @@ class Web(unittest.TestCase):
         self.assertIn(".smallharness/library/manual.md", {x["source"] for x in r["research"]["library"]})
         self.assertEqual(self.req("POST", "/api/research/upload?name=x.md", raw=b"text",
                                   headers={"Content-Type": "application/json"})[0], 403)    # must be binary
+
+    # ---------------------------------------------------------------- relics
+    def test_running_a_relic(self):
+        self.h.relics.record("hi.py", "test")
+        (self.ws / "hi.py").write_text("print('hello from a relic')\n")
+        _, r = self.req("GET", "/api/relics/command?path=hi.py")
+        self.assertEqual(r["command"], "python3 hi.py")
+        self.assertEqual(self.req("GET", "/api/relics/command?path=../x.py")[0], 422)    # outside the workspace
+        status, events = self.req("POST", "/api/relics/run", {"command": r["command"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(events[0]["type"], "start")
+        self.assertIn("hello from a relic", "".join(e.get("text", "") for e in events if e["type"] == "output"))
+        self.assertEqual((events[-1]["type"], events[-1]["code"]), ("done", 0))
+        self.assertEqual(self.req("POST", "/api/relics/run", {"command": ""})[0], 400)
+        self.assertEqual(self.req("POST", "/api/relics/stop", {"id": "nope"})[0], 404)
+
+    def test_asking_about_a_relic(self):
+        self.h.relics.record("hi.py", "test")
+        (self.ws / "hi.py").write_text("one = 1\ntwo = 2\nthree = 3\n")
+        _, r = self.req("GET", "/api/relics/chat?path=hi.py")
+        self.assertEqual((r["chat"], r["keep_context"]), (None, False))
+        status, events = self.req("POST", "/api/relics/chat", {"path": "hi.py", "text": "rename it",
+                                                               "content": "one = 1\nTWO = 2\nthree = 3\n", "start": 2, "end": 2})
+        self.assertEqual(status, 200)
+        added = [e["message"] for e in events if e["type"] == "message"]
+        self.assertEqual([m["role"] for m in added], ["user", "assistant"])
+        self.assertEqual(added[0]["meta"], {"relic": "hi.py", "sections": [[2, 2]]})
+        self.assertIn("TWO = 2", self.backend.prompts[-1])                 # the editor's text, unsaved edits too
+        self.assertNotIn("one = 1", self.backend.prompts[-1])
+        chat = events[-1]["chat"]
+        self.assertEqual(chat["relic"], "hi.py")
+        _, r = self.req("GET", "/api/relics/chat?path=hi.py")
+        self.assertEqual(r["chat"]["id"], chat["id"])
+        _, events = self.req("POST", "/api/relics/chat", {"path": "hi.py", "text": "and the file?"})
+        self.assertIn("three = 3", self.backend.prompts[-1])                # no content: the saved file, whole
+        self.assertEqual(events[-1]["chat"]["id"], chat["id"])
+        self.assertEqual(self.req("POST", "/api/relics/chat", {"path": "hi.py", "text": "x", "start": 2, "end": 9})[0], 422)
+        self.assertEqual(self.req("POST", "/api/relics/chat", {"path": "nope.py", "text": "x"})[0], 404)
+        self.assertEqual(self.req("POST", "/api/relics/chat", {"path": "hi.py", "text": "x", "start": "2"})[0], 400)
+        _, events = self.req("POST", "/api/relics/chat", {"path": "hi.py", "text": "both", "sections": [[3, 3], [1, 1]]})
+        user = [e["message"] for e in events if e["type"] == "message"][0]
+        self.assertEqual(user["meta"]["sections"], [[1, 1], [3, 3]])
+        self.assertIn("2 sections of the file hi.py", self.backend.prompts[-1])
+        self.assertNotIn("two = 2", self.backend.prompts[-1])
+        self.assertEqual(self.req("POST", "/api/relics/chat", {"path": "hi.py", "text": "x", "sections": [[1]]})[0], 400)
+        _, s = self.req("PUT", "/api/chats/settings", {"relic_keep_context": True})
+        self.assertEqual(s, {"keep_context": True, "relic_keep_context": True, "research_keep_context": False})
+        self.assertTrue(self.req("GET", f"/api/chats/{chat['id']}")[1]["keep_context"])
+        self.assertEqual(self.req("PUT", "/api/chats/settings", {})[0], 400)
 
     # ---------------------------------------------------------------- speech
     def test_speech_routes(self):
@@ -342,6 +398,15 @@ class Web(unittest.TestCase):
         self.assertEqual(events[-1]["chat"]["title"], "/read readme.txt")
         self.assertEqual(self.req("POST", f"/api/chats/{cid}/send", {"text": "/nope"})[0], 422)   # before any job
         self.assertEqual(self.req("POST", f"/api/chats/{cid}/send", {"text": "x", "thread": 99})[0], 404)
+        _, c2 = self.req("PUT", f"/api/chats/{cid}", {"keep_context": False})
+        self.assertEqual((c2["keep_context"], c2["keep_context_default"]), (False, False))
+        self.assertEqual(self.req("PUT", f"/api/chats/{cid}", {"keep_context": "no"})[0], 400)
+        _, c2 = self.req("PUT", f"/api/chats/{cid}", {"keep_context": None})
+        self.assertEqual((c2["keep_context"], c2["keep_context_default"]), (True, True))
+        self.assertEqual(self.req("PUT", "/api/chats/settings", {"keep_context": False})[1]["keep_context"], False)
+        self.assertFalse(self.req("GET", "/api/chats")[1]["keep_context"])
+        self.assertFalse(self.req("GET", f"/api/chats/{cid}")[1]["keep_context"])
+        self.req("PUT", "/api/chats/settings", {"keep_context": True})
         status, saved = self.req("POST", f"/api/chats/{cid}/export", {"num": added[1]["num"], "path": "out/answer.md"})
         self.assertEqual((status, saved["path"]), (200, "out/answer.md"))
         self.assertIn("tangerine", (self.ws / "out/answer.md").read_text())

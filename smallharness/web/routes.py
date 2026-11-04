@@ -85,7 +85,7 @@ def get_research(app: WebApp, q, body):
 
 @route("POST", "/api/research/new")
 def post_research_new(app: WebApp, q, body):
-    """A new research session: no answers, no references, nothing attached."""
+    """A new research session: no answers, no references, nothing pinned."""
     app.new_research()
     return _research_dict(app)
 
@@ -181,10 +181,10 @@ def put_research_scope(app: WebApp, q, body):
     return _research_dict(app)
 
 
-@route("PUT", r"/api/research/answers/(\d+)/attach")
-def put_research_attach(app: WebApp, q, body, num):
+@route("PUT", r"/api/research/answers/(\d+)/pin")
+def put_research_pin(app: WebApp, q, body, num):
     """Keep an answer in the context of later questions (CAG), or take it out."""
-    (app.research.attach if body.get("attached", True) else app.research.detach)(int(num))
+    app.research.pin(int(num), bool(body.get("pinned", True)))
     return _research_dict(app)
 
 
@@ -376,7 +376,7 @@ def _chat_busy(app: WebApp, cid: str) -> None:
 @route("GET", "/api/chats")
 def get_chats(app: WebApp, q, body):
     from ..chat import COMMANDS
-    return {"chats": app.h.chats.list(),
+    return {"chats": app.h.chats.list(), **app.h.chats.context_settings(),
             "commands": [{"name": k, "usage": u, "about": a} for k, (u, a) in COMMANDS.items()],
             "tools": [t.name for t in app.h.tools]}
 
@@ -391,10 +391,38 @@ def get_chat(app: WebApp, q, body, cid):
     return app.h.chats.load(cid).to_dict()
 
 
+@route("PUT", "/api/chats/settings")
+def put_chat_settings(app: WebApp, q, body):
+    """Keeping context (Settings → Context), each true or false: 'keep_context' for all
+    chats, 'relic_keep_context' for relic chats (the Relics page), 'research_keep_context'
+    for research questions."""
+    from ..chat import ChatStore
+    keys = {key: kind for kind, (key, _, _) in ChatStore.CONTEXT.items()}
+    if not any(k in body for k in keys):
+        raise ApiError(400, "send " + " or ".join(f"'{k}'" for k in keys))
+    for key in keys:
+        if key in body and not isinstance(body[key], bool):
+            raise ApiError(400, f"'{key}' is true or false")
+    for key, kind in keys.items():
+        if key in body:
+            app.h.chats.set_keep_context_for(kind, body[key])
+    return app.h.chats.context_settings()
+
+
 @route("PUT", r"/api/chats/([\w-]+)")
 def put_chat(app: WebApp, q, body, cid):
+    """Rename a chat ('title'), and/or switch keeping context ('keep_context': true,
+    false, or null to follow the default for all chats)."""
     chat = app.h.chats.load(cid)
-    chat.title = _need(body, "title").strip()[:120]
+    if "title" not in body and "keep_context" not in body:
+        raise ApiError(400, "send 'title' or 'keep_context'")
+    if "title" in body:
+        chat.title = _need(body, "title").strip()[:120]
+    if "keep_context" in body:
+        value = body["keep_context"]
+        if value is not None and not isinstance(value, bool):
+            raise ApiError(400, "'keep_context' is true, false or null")
+        chat.keep_context_set = value
     chat.save()
     return chat.to_dict()
 
@@ -495,6 +523,83 @@ def put_relic(app: WebApp, q, body):
         raise ApiError(400, "'text' is required")
     app.h.relics.save(path, text)
     return {"path": path, "relics": app.h.relics.all()}
+
+
+@route("GET", "/api/relics/chat")
+def get_relic_chat(app: WebApp, q, body):
+    """The chat about this relic, or null if there is none yet."""
+    chat = app.h.chats.for_relic(app.h.relics.rel(q.get("path", "")), create=False)
+    return {"chat": chat.to_dict() if chat else None, "keep_context": app.h.chats.relic_keep_context}
+
+
+@route("POST", "/api/relics/chat")
+def post_relic_chat(app: WebApp, q, body):
+    """A message about a relic, in the relic's own chat, carrying its text ('content':
+    the editor's, unsaved edits too; else the file), or only some line ranges of it
+    ('sections': [[first, last], ...]; or 'start'..'end'). Streams like a chat message."""
+    from ..chat import relic_attachment
+    rel = app.h.relics.rel(_need(body, "path"))
+    text = _need(body, "text")
+    content = body.get("content")
+    if content is not None and not isinstance(content, str):
+        raise ApiError(400, "'content' is the relic's text")
+    saved = app.h.relics.read(rel)           # only relics, and only text ones
+    if content is None:
+        content = saved
+    sections = body.get("sections")
+    if sections is None and (body.get("start") is not None or body.get("end") is not None):
+        sections = [[body.get("start") or 1, body.get("end") or len(content.split("\n"))]]
+    if sections is not None and not (isinstance(sections, list) and all(
+            isinstance(x, list) and len(x) == 2 and all(isinstance(n, int) and not isinstance(n, bool) for n in x)
+            for x in sections)):
+        raise ApiError(400, "'sections' is a list of [first line, last line]")
+    attach, meta = relic_attachment(rel, content, sections)
+    chat = app.h.chats.for_relic(rel)
+    _chat_busy(app, chat.id)
+    commands, question = chat.check(text)
+
+    def produce(ev: WebEvents, job: Job) -> Iterator[dict]:
+        job.subject = chat
+        if question or any(n in ("agent", "ask", "plan", "runplan") for n, _ in commands):
+            app.ensure_loaded(ev)
+        chat.send(text, 0, ev, on_message=lambda m: ev.emit({"type": "message", "message": asdict(m)}),
+                  attach=attach, attach_meta=meta)
+        yield {"type": "done", "chat": chat.to_dict(), "state": app.state()}
+    return app.start_job("chat", chat.id, "answering about a relic", produce)
+
+
+@route("GET", "/api/relics/command")
+def get_relic_command(app: WebApp, q, body):
+    """The command that would probably run this relic ("" if none comes to mind)."""
+    from ..runner import suggest
+    path = app.h.relics.rel(q.get("path", ""))
+    return {"path": path, "command": suggest(app.h.cfg.workspace, path)}
+
+
+@route("POST", "/api/relics/run")
+def post_relic_run(app: WebApp, q, body):
+    """Run a command in the workspace (the user's own, from the Relics page), streaming
+    its output. A page that goes away stops it; so does POST /api/relics/stop."""
+    run = app.runner.start(_need(body, "command"))
+
+    def stream(ev: WebEvents) -> Iterator[dict]:
+        ev.emit({"type": "start", "id": run.id, "command": run.command})
+        try:
+            for kind, value in run.follow():
+                if kind == "out":
+                    ev.emit({"type": "output", "text": value})
+                else:
+                    yield {"type": "done", "code": value, "stopped": run.stopped,
+                           "seconds": round(time.time() - run.started, 1)}
+        finally:
+            run.stop("the page went away")
+    return stream
+
+
+@route("POST", "/api/relics/stop")
+def post_relic_stop(app: WebApp, q, body):
+    app.runner.get(_need(body, "id")).stop()
+    return {"stopped": True}
 
 
 @route("DELETE", "/api/relics/file")

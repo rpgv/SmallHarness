@@ -60,13 +60,22 @@ summary_budget = 0.10
 [research]
 k = 6                            # excerpts found per question
 excerpt_budget = 0.5             # max fraction of the window for the excerpts
-attached_budget = 0.2            # max fraction for attached answers (CAG)
+pinned_budget = 0.2              # max fraction for pinned answers (CAG); was attached_budget
+keep_context = false             # also show the session's latest answers (Settings → Context overrides)
+history_budget = 0.2             # max fraction for those answers, when keeping context
 
 [tools]
 auto = true                      # model may call tools itself (type 1 still asks)
 max_steps = 6
 max_result_chars = 3000
 extra_dirs = []                  # more folders of drop-in tools
+
+[relics]
+run_timeout = 300                # seconds before a run from the Relics page is stopped
+keep_context = false             # relic chats (Ask on the Relics page) see only the message they answer
+
+[chat]
+keep_context = true             # false: replies see only the message they answer (plus pins and threads)
 
 [plan]
 default_mode = "fresh"           # fresh | continuous

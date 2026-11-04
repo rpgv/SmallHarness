@@ -21,17 +21,23 @@ are the types in `[rag]`: by default `.txt`, `.md`, `.py`, `.sh`, PDFs and image
 ## Asking
 Type a question. The harness searches for the best excerpts (k = `[research].k`) and
 the model answers from those alone, in a clean context: the system prompt, the
-numbered excerpts, any attached answers, and the question. No history and no tools.
-If nothing matches, the model is not asked.
+numbered excerpts, any pinned answers, and the question. No tools, and by default no
+history. If nothing matches, the model is not asked.
 
 - **References.** The answer cites excerpts as numbers only, like `[3]`. A number means
   the same excerpt for the whole research session, and leads to the session's
   bibliography, a temporary file (`.smallharness/research/<id>.md`) with each
   excerpt's source, line and text. In the terminal, `/bibliography [N]`; on the web,
   the Bibliography pane, or click a `[n]`.
-- **Attaching (CAG).** The context stays clear by default. `/attach N` (or Attach on
-  the web) keeps answer N in the context of later questions, until `/detach N`.
-  Attached answers share `[research].attached_budget` of the window.
+- **Pinning (CAG).** The context stays clear by default. `/pin N` (or *Pin* on the
+  answer, on the web) keeps answer N in the context of later questions, until
+  `/unpin N`, as pinning does in chat. Pinned answers share `[research].pinned_budget`
+  of the window (formerly `/attach`, `/detach` and `attached_budget`, still accepted).
+- **Keeping context.** Off by default: each question sees only its excerpts and the
+  pinned answers. Switch it on under **Settings → Context** on the web (or
+  `[research].keep_context = true`) and each question also sees the session's latest
+  answers, newest first, whole, as many as fit in `[research].history_budget` of the
+  window (0.2). Pinned answers are not repeated there.
 - **Scope.** `/scope FILE…` (or the checkboxes next to files and notes on the web)
   limits questions to some files, folders or notes; `/scope all` searches everything
   again. `/find WORDS` shows the excerpts a question would get, without asking the
@@ -41,10 +47,10 @@ If nothing matches, the model is not asked.
 Nothing leaves your machine unless you type one of these commands. Only the question,
 search words or identifier are sent.
 
-- **Gemini** (`/gemini QUESTION`, or **Gemini** beside Ask on the web) asks a model
+- **Gemini** (`/gemini QUESTION`, or the **Gemini** tab of Research on the web) asks a model
   much larger than the local one, for what it knows. Only the question is sent: no
   files, no notes, no conversation. The answer joins the session like any other, so
-  you can attach it (`/attach N`) to keep it in mind, or save it (`/save N [NAME]`, or
+  you can pin it (`/pin N`) to keep it in mind, or save it (`/save N [NAME]`, or
   *Save* on the answer) to put it into the knowledge base as a Markdown file in
   `.smallharness/library/`. In chat, `/gemini QUESTION` adds the answer to the
   conversation, and `/kb N` puts it into the knowledge base.

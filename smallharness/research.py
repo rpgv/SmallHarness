@@ -4,15 +4,17 @@ notes, searched by the harness and answered from by the model.
 - Everything is indexed into the project RAG index when it is added; adding may take a
   while (OCR, embeddings) so that asking is fast.
 - Each question is answered in a clean context: a one-line system prompt, the numbered
-  excerpts the search found, any answers you attached, and the question. No
-  conversation history, no tools.
+  excerpts the search found, any answers you pinned, and the question. No tools, and no
+  earlier answers unless keeping context is switched on (Settings → Context, or
+  [research].keep_context): then the session's latest answers come too, as many as fit
+  in [research].history_budget.
 - Excerpts keep one number for the whole research session, so the answer's [n] marks
   point into the session's bibliography (`.smallharness/research/<id>.md`), which
   lists each source, line and excerpt.
-- Attach an answer to keep it in the context of later questions (CAG); detach it to
-  take it out. Questions can be limited to some files (the scope).
+- Pin an answer to keep it in the context of later questions (CAG); unpin it to take
+  it out. Questions can be limited to some files (the scope).
 - Outside sources, only on command: asking Gemini, a larger model (`gemini`), gives
-  an answer that can be attached like any other, or saved into the knowledge base
+  an answer that can be pinned like any other, or saved into the knowledge base
   (`save`); PubMed (`pubmed`) finds open-access articles, and `add_article` puts one
   into the knowledge base by DOI, PMCID or PMID."""
 from __future__ import annotations
@@ -52,7 +54,7 @@ class Answer:
     text: str
     refs: list[int]                       # the references it rests on
     scope: list[str] = field(default_factory=list)
-    attached: bool = False
+    pinned: bool = False
     kind: str = "kb"                      # kb: from the knowledge base | gemini: asked of Gemini
     sources: list[dict] = field(default_factory=list)   # gemini with search: {"title", "url"}
     model: str = ""                       # gemini: the model that answered
@@ -68,7 +70,7 @@ class Answer:
 
     def to_dict(self) -> dict:
         return {"num": self.num, "question": self.question, "text": self.text, "refs": self.refs,
-                "scope": self.scope, "attached": self.attached, "kind": self.kind, "sources": self.sources,
+                "scope": self.scope, "pinned": self.pinned, "kind": self.kind, "sources": self.sources,
                 "saved": self.saved, "model": self.model}
 
 
@@ -237,13 +239,29 @@ class Research:
             excerpts.append(part)
             used += cost
         given = [r.num for r in refs[:len(excerpts)]]
-        attached = [a for a in self.answers if a.attached]
-        attached_text = ""
-        if attached:
-            body = "\n\n".join(f"Q: {a.question}\nA: {_plain(a.text)}" for a in attached)
-            attached_text = prompts.ATTACHED.format(
-                answers=count.truncate(body, int(budget * self.settings["attached_budget"])))
-        prompt = prompts.RESEARCH.format(attached=attached_text, excerpts="\n\n".join(excerpts), question=question)
+        s = self.settings
+        qa = lambda a: f"Q: {a.question}\nA: {_plain(a.text)}"
+        pinned = [a for a in self.answers if a.pinned]
+        pinned_text = ""
+        if pinned:
+            share = s["attached_budget"] if "attached_budget" in s else s["pinned_budget"]   # its old name
+            pinned_text = prompts.PINNED.format(
+                answers=count.truncate("\n\n".join(qa(a) for a in pinned), int(budget * share)))
+        earlier_text = ""
+        if self.keep_context:
+            room, earlier = int(budget * s["history_budget"]), []
+            for a in reversed(self.answers):          # the latest first, whole answers only
+                if a.pinned or (a.kind == "kb" and not a.refs):
+                    continue                          # shown already, or "nothing matches"
+                cost = count(qa(a))
+                if cost > room:
+                    break
+                earlier.insert(0, qa(a))
+                room -= cost
+            if earlier:
+                earlier_text = prompts.EARLIER.format(answers="\n\n".join(earlier))
+        prompt = prompts.RESEARCH.format(pinned=pinned_text, earlier=earlier_text,
+                                         excerpts="\n\n".join(excerpts), question=question)
         reply = self.h.generate_clean(prompt, prompts.RESEARCH_SYSTEM, stream=events is not None, events=events)
         text = _CITE.sub(lambda m: m.group(0) if int(m.group(1)) in given else "", reply).strip()
         cited = sorted({int(n) for n in _CITE.findall(text)})
@@ -251,21 +269,24 @@ class Research:
         self.answers.append(answer)
         return answer
 
-    # ---------------------------------------------------------- attaching
+    @property
+    def keep_context(self) -> bool:
+        """Whether a question also sees the session's earlier answers (Settings → Context)."""
+        return self.h.chats.keep_context_for("research")
+
+    # ------------------------------------------------------------ pinning
     def answer(self, num: int) -> Answer:
         if not 1 <= num <= len(self.answers):
             raise NotFound(f"no answer {num}")
         return self.answers[num - 1]
 
-    def attach(self, num: int) -> Answer:
+    def pin(self, num: int, on: bool = True) -> Answer:
         a = self.answer(num)
-        a.attached = True
+        a.pinned = on
         return a
 
-    def detach(self, num: int) -> Answer:
-        a = self.answer(num)
-        a.attached = False
-        return a
+    def unpin(self, num: int) -> Answer:
+        return self.pin(num, False)
 
     # -------------------------------------------------------- bibliography
     def bibliography(self) -> str:
@@ -279,7 +300,7 @@ class Research:
         self.bibliography_path.write_text(self.bibliography() + "\n", encoding="utf-8")
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "scope": self.scope, "answers": [a.to_dict() for a in self.answers],
+        return {"id": self.id, "scope": self.scope, "keep_context": self.keep_context, "answers": [a.to_dict() for a in self.answers],
                 "references": [{"num": r.num, "source": r.source, "start_line": r.start_line, "text": r.text}
                                for r in self.refs],
                 "bibliography": str(self.bibliography_path)}

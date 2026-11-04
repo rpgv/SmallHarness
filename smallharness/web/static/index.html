@@ -46,10 +46,13 @@
       <div class="chat-main">
         <div class="row chat-head">
           <input id="chat-title" class="grow" placeholder="New chat" title="the chat's name: edit to rename">
+          <label class="check switch" id="chat-context-label"
+                 title="on: replies see the conversation so far. Off: only the message they answer, pinned messages and threads">
+            <input type="checkbox" id="chat-context"> context</label>
           <span id="chat-meter" class="muted" title="how much of the window the last reply's context used"></span>
           <button id="chat-delete" class="small link" title="delete this chat" hidden>delete</button>
         </div>
-        <div id="chat-pins" class="attached" hidden></div>
+        <div id="chat-pins" class="pins" hidden></div>
         <details id="chat-summary" class="summary" hidden><summary>earlier turns, folded into a summary</summary>
           <pre class="out"></pre></details>
         <div id="chat-messages" class="messages" aria-live="polite"></div>
@@ -89,12 +92,13 @@
   <section id="view-research" class="view">
     <div class="subtabs" id="research-tabs">
       <button data-pane="ask" class="active">Ask</button>
+      <button data-pane="gemini" title="ask Gemini, a larger model: only the question is sent">Gemini</button>
       <button data-pane="bibliography">Bibliography</button>
       <button data-pane="pubmed">PubMed</button>
       <span class="grow"></span>
       <label class="check" title="loading time, wait for the first token, and tokens per second under each answer">
         <input type="checkbox" id="show-speed"> speed</label>
-      <button id="research-new" class="small secondary" title="a new session: no answers, references or attachments">New session</button>
+      <button id="research-new" class="small secondary" title="a new session: no answers, references or pins">New session</button>
     </div>
 
     <div id="pane-ask" class="rpane active">
@@ -105,14 +109,13 @@
       </aside>
 
       <div class="ask-main">
-        <div id="attached" class="attached" hidden></div>
+        <div id="research-pins" class="pins" hidden></div>
+        <p id="research-context-note" class="hint" hidden></p>
         <div id="answers" class="messages" aria-live="polite"></div>
         <form id="ask-form" class="composer">
           <textarea id="ask-input" rows="2" placeholder="Ask about your files and notes…"
                     title="Enter sends; Shift+Enter starts a new line"></textarea>
           <button type="submit" id="ask-btn">Ask</button>
-          <button type="button" id="gemini-btn" class="secondary"
-                  title="ask Gemini, a larger model, instead (only the question is sent); attach or save the answer after">Gemini</button>
         </form>
         <div class="files-bar">
           <div class="row">
@@ -130,6 +133,19 @@
           <p id="add-result" class="hint" hidden></p>
           <p id="research-search" class="hint"></p>
         </div>
+      </div>
+    </div>
+
+    <div id="pane-gemini" class="rpane">
+      <div class="ask-main">
+        <p class="hint">Gemini, a larger model, gets only the question: no excerpts, no earlier answers. Pin an answer
+          to keep it in mind under Ask, or save it into the knowledge base. Needs a Gemini key (Settings → API keys).</p>
+        <div id="gemini-answers" class="messages" aria-live="polite"></div>
+        <form id="gemini-form" class="composer">
+          <textarea id="gemini-input" rows="2" placeholder="Ask Gemini…"
+                    title="Enter sends; Shift+Enter starts a new line"></textarea>
+          <button type="submit" id="gemini-btn">Ask Gemini</button>
+        </form>
       </div>
     </div>
 
@@ -294,13 +310,48 @@
             <span id="relic-meta" class="muted"></span>
           </div>
           <p id="relic-note" class="hint"></p>
-          <textarea id="relic-text" class="editor" spellcheck="false"></textarea>
+          <div class="code-wrap" id="relic-wrap">
+            <pre id="relic-ln" class="ln" aria-hidden="true"></pre>
+            <pre id="relic-hl" class="hl" aria-hidden="true"><code></code></pre>
+            <textarea id="relic-text" class="editor code" spellcheck="false" wrap="off" autocapitalize="off"
+                      autocomplete="off"></textarea>
+          </div>
           <div class="row">
             <button id="relic-save">Save</button>
             <button id="relic-revert" class="secondary" title="load the file again; unsaved changes are lost">Revert</button>
             <span id="relic-status" class="muted"></span>
             <span class="grow"></span>
             <button id="relic-forget" class="small secondary" title="take it off the list; the file stays">Forget</button>
+          </div>
+          <div id="relic-convo" class="relic-convo" hidden>
+            <div class="row">
+              <button type="button" id="relic-convo-toggle" class="small link grow" title="show or hide the conversation"></button>
+              <a href="#" id="relic-open-chat" class="small link" title="continue it in the Chat tab">open in Chat</a>
+            </div>
+            <div id="relic-convo-list" class="relic-convo-list"></div>
+          </div>
+          <form id="relic-ask-form" class="relic-ask">
+            <div class="row"><strong>Ask</strong>
+              <span id="relic-scope" class="muted grow" title="select lines in the editor to ask about those only"></span>
+              <button type="button" id="relic-add-section" class="small secondary"
+                      title="keep the selected lines as a section, then select more: the message carries every section">+ section</button></div>
+            <div id="relic-sections" class="chips" hidden></div>
+            <div class="row">
+              <textarea id="relic-ask" rows="2" placeholder="Ask the model about this relic, or to change it (Enter sends, Shift+Enter: new line)"></textarea>
+              <button id="relic-ask-send" title="send, with the selected lines (or the whole file) as it is in the editor">Send</button>
+            </div>
+          </form>
+          <form id="relic-run-form" class="runbar relic-run">
+            <strong>Run</strong>
+            <input id="relic-cmd" placeholder="a command, run in the workspace" spellcheck="false" autocapitalize="off"
+                   title="suggested from the file's type or its #! line; edit it as you like. Unsaved edits are saved first.">
+            <button id="relic-run" title="run it in the workspace (it does not ask: it is your own command)">Run</button>
+            <button type="button" id="relic-stop" class="danger" hidden>Stop</button>
+          </form>
+          <div id="relic-out-wrap" hidden>
+            <div class="row"><span id="relic-run-status" class="muted grow"></span>
+              <button type="button" id="relic-out-clear" class="small link">clear</button></div>
+            <pre id="relic-out" class="out run-out"></pre>
           </div>
         </div>
       </div>
@@ -354,6 +405,21 @@
     <div class="card">
       <h3>Status</h3>
       <dl id="status-list" class="kv"></dl>
+    </div>
+    <div class="card">
+      <h3>Context</h3>
+      <p class="hint">Whether earlier messages reach the model. Pinned messages and answers always do; everything is
+        still kept and shown either way.</p>
+      <label class="check"><input type="checkbox" id="default-context"> Chats</label>
+      <p class="hint">The default for every chat that was not switched on its own (the <em>context</em> toggle next to a
+        chat's title). Off, a reply sees only the message it answers, pinned messages and its thread.</p>
+      <label class="check"><input type="checkbox" id="relic-context"> Relic chats</label>
+      <p class="hint">Asking about a relic (the <em>Ask</em> box on the Relics page) talks in that relic's own chat, and
+        each message carries its sections or the whole file. Off (the default), a reply sees only the message it
+        answers, so earlier copies of the file do not fill the context.</p>
+      <label class="check"><input type="checkbox" id="research-context"> Research</label>
+      <p class="hint">Off (the default), each question is answered from its excerpts and the pinned answers alone. On,
+        the session's latest answers come too, as many as fit in <code>[research].history_budget</code>.</p>
     </div>
     <div class="card">
       <h3>API keys</h3>

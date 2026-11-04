@@ -14,6 +14,10 @@
   the question it answered) and the thread's own replies, not the whole conversation.
 - Rewind to a message to clear everything after it: the messages, the threads on them,
   their pins, and any summary folded since. Rewinding a thread clears only the thread.
+- Keeping context can be turned off, per chat or as the default for all chats. Off,
+  each reply in the conversation sees only the message it answers (with what its
+  command lines brought in), the pinned messages, and nothing else said before; a
+  reply in a thread still sees the thread. Every message is still kept and shown.
 
 A chat is kept as `.smallharness/chats/<id>.json`, its archive of folded turns beside it."""
 from __future__ import annotations
@@ -76,6 +80,55 @@ def code_blocks(text: str) -> list[tuple[str, str]]:
     """A message's fenced code blocks, in order, as (language, content)."""
     return [(lang.strip().split()[0].lower() if lang.strip() else "", body) for lang, body in _FENCE.findall(text)]
 _ID = re.compile(r"[\w-]+")
+
+
+def relic_sections(sections, total: int) -> list[tuple[int, int]]:
+    """Line ranges [a, b] (from 1, inclusive) checked against a file of `total` lines,
+    in order, with overlapping ones merged."""
+    out: list[list[int]] = []
+    for sec in sections:
+        try:
+            a, b = (int(x) for x in sec)
+        except (TypeError, ValueError):
+            raise Invalid("a section is [first line, last line]") from None
+        if not (1 <= a <= b <= total):
+            raise Invalid(f"lines {a}-{b}: the file has {total} lines")
+        out.append([a, b])
+    out.sort()
+    merged: list[list[int]] = []
+    for a, b in out:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return [(a, b) for a, b in merged]
+
+
+def relic_attachment(path: str, text: str, sections=None) -> tuple[str, dict]:
+    """A relic's text, or some of its line ranges (`sections`: [(a, b), ...], from 1,
+    inclusive), as the model sees it after a question on the Relics page; and the
+    message meta that records which lines ({"relic", "sections"})."""
+    lines = text.split("\n")
+    total = len(lines)
+    secs = relic_sections(sections, total) if sections else []
+    parts = ["\n".join(lines[a - 1:b]) for a, b in secs] if secs else [text]
+    runs = [len(r) for part in parts for r in re.findall(r"`{3,}", part)]
+    fence = "`" * max(3, max(runs, default=0) + 1)
+    lang = Path(path).suffix.lstrip(".")
+    meta: dict = {"relic": path}
+    if not secs:
+        return (f"The file {path} ({total} lines):\n{fence}{lang}\n{text}\n{fence}\n"
+                "If you change the code, give the complete new version of the whole file in one fenced code block."), meta
+    meta["sections"] = [list(s) for s in secs]
+    if len(secs) == 1:
+        (a, b), = secs
+        return (f"Lines {a}-{b} of the file {path} ({total} lines):\n{fence}{lang}\n{parts[0]}\n{fence}\n"
+                "If you change the code, give the complete new version of these lines in one fenced code block."), meta
+    body = "\n".join(f"Lines {a}-{b}:\n{fence}{lang}\n{part}\n{fence}" for (a, b), part in zip(secs, parts))
+    return (f"{len(secs)} sections of the file {path} ({total} lines; the rest is not shown):\n{body}\n"
+            "If you change the code, give the complete new version of each section you change in its own fenced "
+            "code block, right after its label (like \"Lines 3-10:\"), in the same order."), meta
+
 
 
 @dataclass
@@ -182,6 +235,8 @@ class Chat:
         self.updated: float = data.get("updated", self.created)
         self.messages = [Message(**m) for m in data.get("messages", [])]
         self.folds = {k: [Fold(**f) for f in v] for k, v in data.get("folds", {}).items()}
+        self.keep_context_set: bool | None = data.get("keep_context")   # None: the default for all chats
+        self.relic: str = data.get("relic", "")       # a relic's own chat (Relics page): its path
         self._archive: RagStore | None = None
         self._research = None
 
@@ -189,6 +244,8 @@ class Chat:
     def save(self) -> None:
         self.updated = time.time()
         data = {"title": self.title, "created": self.created, "updated": self.updated,
+                "keep_context": self.keep_context_set,
+                **({"relic": self.relic} if self.relic else {}),
                 "messages": [asdict(m) for m in self.messages],
                 "folds": {k: [asdict(f) for f in v] for k, v in self.folds.items()}}
         tmp = self.path.with_suffix(".json.tmp")
@@ -222,6 +279,8 @@ class Chat:
         return {"id": self.id, "title": self.title or "New chat", "created": self.created,
                 "updated": self.updated, "messages": [asdict(m) for m in self.messages],
                 "threads": threads, "pinned": [m.num for m in self.messages if m.pinned],
+                "keep_context": self.keep_context, "keep_context_default": self.keep_context_set is None,
+                "relic": self.relic,
                 "summaries": {k: v[-1].summary for k, v in self.folds.items() if v}}
 
     # ----------------------------------------------------------- messages
@@ -284,6 +343,18 @@ class Chat:
         return len(gone)
 
     # ------------------------------------------------------------ context
+    @property
+    def keep_context(self) -> bool:
+        """Whether replies see the conversation so far (else: only the message they answer)."""
+        if self.keep_context_set is not None:
+            return self.keep_context_set
+        return self.h.chats.relic_keep_context if self.relic else self.h.chats.default_keep_context
+
+    def set_keep_context(self, on: bool | None) -> None:
+        """On, off, or None to follow the default for all chats."""
+        self.keep_context_set = on
+        self.save()
+
     def _turns(self, thread: int) -> list[Turn]:
         msgs = []
         if thread:                       # a thread starts from its message, and the question it answered
@@ -293,7 +364,12 @@ class Chat:
                 if asked:
                     msgs.append(asked[-1])
             msgs.append(root)
-        msgs += self.line(thread)
+        line = self.line(thread)
+        if not thread and not self.keep_context:
+            # Only the message being answered, and what its command lines added after it.
+            asked = [i for i, m in enumerate(line) if m.role == "user"]
+            line = line[asked[-1]:] if asked else []
+        msgs += line
         return [Turn(m.num, m.role, m.seen) for m in msgs if m.seen]
 
     def context(self, thread: int = 0) -> ChatContext:
@@ -359,9 +435,12 @@ class Chat:
         return commands, question
 
     def send(self, text: str, thread: int = 0, events: Events | None = None,
-             on_message: Callable[[Message], None] | None = None) -> list[Message]:
+             on_message: Callable[[Message], None] | None = None,
+             attach: str = "", attach_meta: dict | None = None) -> list[Message]:
         """A message, its commands, and the model's reply. `thread`: reply in the thread
-        on that message. Returns the messages added, each also passed to `on_message`."""
+        on that message. Returns the messages added, each also passed to `on_message`.
+        `attach` goes after the question in what the model sees (not in what the chat
+        shows), with `attach_meta` in the message's meta: a relic's lines, say."""
         commands, question = self.check(text)
         text = text.strip()
         thread = self.thread_of(thread) if thread else 0
@@ -374,8 +453,11 @@ class Chat:
                 on_message(m)
         if not self.title:
             self.title = text.splitlines()[0][:60]
-        user = self._add("user", text, thread, seen=question,
-                         **({"commands": [n for n, _ in commands]} if commands else {}))
+        seen = f"{question}\n\n{attach}" if question and attach else question
+        meta = {"commands": [n for n, _ in commands]} if commands else {}
+        if question and attach_meta:
+            meta.update(attach_meta)
+        user = self._add("user", text, thread, seen=seen, **meta)
         keep(user)
         for name, arg in commands:
             try:
@@ -581,11 +663,74 @@ class ChatStore:
         self._open: dict[str, Chat] = {}
 
     @property
+    def _settings_path(self) -> Path:
+        return self.dir / "settings.json"
+
+    def _settings(self) -> dict:
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _set(self, key: str, value) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        data = self._settings()
+        data[key] = value
+        self._settings_path.write_text(json.dumps(data), encoding="utf-8")
+
+    # Keeping context, per kind of conversation: kept in the workspace
+    # (chats/settings.json) once changed in Settings, else the config file's default.
+    # chat: chats (each can also be switched on its own); relic: relic chats (each
+    # message carries the relic's current text, so earlier turns are mostly old copies
+    # of it); research: research questions (each answered from its excerpts alone).
+    CONTEXT = {"chat": ("keep_context", "chat", True), "relic": ("relic_keep_context", "relics", False),
+               "research": ("research_keep_context", "research", False)}
+
+    def keep_context_for(self, kind: str) -> bool:
+        key, section, default = self.CONTEXT[kind]
+        value = self._settings().get(key)
+        return bool(self.h.cfg[section].get("keep_context", default)) if value is None else bool(value)
+
+    def set_keep_context_for(self, kind: str, on: bool) -> None:
+        self._set(self.CONTEXT[kind][0], bool(on))
+
+    def context_settings(self) -> dict:
+        """{"keep_context", "relic_keep_context", "research_keep_context"}: as the page names them."""
+        return {key: self.keep_context_for(kind) for kind, (key, _, _) in self.CONTEXT.items()}
+
+    @property
+    def default_keep_context(self) -> bool:
+        return self.keep_context_for("chat")
+
+    def set_default_keep_context(self, on: bool) -> None:
+        self.set_keep_context_for("chat", on)
+
+    @property
+    def relic_keep_context(self) -> bool:
+        return self.keep_context_for("relic")
+
+    def set_relic_keep_context(self, on: bool) -> None:
+        self.set_keep_context_for("relic", on)
+
+    def for_relic(self, rel: str, create: bool = True) -> Chat | None:
+        """The chat about this relic (its path in the workspace), made if there is none."""
+        for c in self.list():
+            if c.get("relic") == rel:
+                return self.load(c["id"])
+        if not create:
+            return None
+        chat = self.new(save=False)
+        chat.relic, chat.title = rel, f"relic: {rel}"[:120]
+        chat.save()
+        return chat
+
+    @property
     def dir(self) -> Path:
         return self.h.cfg.state.chats
 
     def _path(self, chat_id: str) -> Path:
-        if not _ID.fullmatch(chat_id or ""):
+        if not _ID.fullmatch(chat_id or "") or chat_id == "settings":
             raise Invalid(f"bad chat id {chat_id!r}")
         return self.dir / f"{chat_id}.json"
 
@@ -609,6 +754,8 @@ class ChatStore:
     def list(self) -> list[dict]:
         out = []
         for p in self.dir.glob("*.json"):
+            if p.name == "settings.json":
+                continue
             chat = self._open.get(p.stem)
             if chat is None:
                 try:
@@ -616,9 +763,11 @@ class ChatStore:
                 except (OSError, json.JSONDecodeError):
                     continue
                 title, updated, count = data.get("title", ""), data.get("updated", 0), len(data.get("messages", []))
+                relic = data.get("relic", "") if isinstance(data, dict) else ""
             else:
-                title, updated, count = chat.title, chat.updated, len(chat.messages)
-            out.append({"id": p.stem, "title": title or "New chat", "updated": updated, "messages": count})
+                title, updated, count, relic = chat.title, chat.updated, len(chat.messages), chat.relic
+            out.append({"id": p.stem, "title": title or "New chat", "updated": updated, "messages": count,
+                        **({"relic": relic} if relic else {})})
         return sorted(out, key=lambda c: c["updated"], reverse=True)
 
     def latest(self) -> Chat | None:

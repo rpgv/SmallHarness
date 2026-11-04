@@ -18,6 +18,8 @@ HELP = [
     ("/history", "the conversation so far, or the thread you are in"),
     ("/chats, /open ID, /new", "your chats: list, open one, start another"),
     ("/title TEXT, /forget ID", "rename this chat; delete a chat"),
+    ("/context [on|off|default]", "keep context in this chat, or not (off: replies see only the message they "
+                                  "answer, pins and threads); `/context default on|off` for all chats"),
     ("/commands", "the commands a message can start with"),
 ]
 
@@ -168,6 +170,26 @@ class ChatShell(Shell):
         self.chat.title = arg
         self.chat.save()
         print(ui.ok("  ✓ renamed"))
+
+    def cmd_context(self, arg):
+        words = arg.lower().split()
+        chats = self.h.chats
+        if words[:1] == ["default"]:
+            if len(words) > 1:
+                if words[1] not in ("on", "off"):
+                    print(ui.err("usage: /context default on|off"))
+                    return
+                chats.set_default_keep_context(words[1] == "on")
+            print(ui.dim(f"  new chats {'keep' if chats.default_keep_context else 'do not keep'} context (default)"))
+            return
+        if words:
+            if words[0] not in ("on", "off"):
+                print(ui.err("usage: /context [on|off|default]"))
+                return
+            self.chat.set_keep_context(words[0] == "on")
+        state = "on: replies see the conversation so far" if self.chat.keep_context else \
+            "off: replies see only the message they answer, pinned messages and threads"
+        print(ui.dim(f"  context {state}" + (" (the default)" if self.chat.keep_context_set is None else "")))
 
     def cmd_forget(self, arg):
         if not arg or not ui.confirm(f"Delete the chat {arg}?", tty_only=False):
