@@ -7,8 +7,9 @@ How RAM is counted depends on the backend's `memory` kind:
             the pool is idle (a reading taken mid-call would miss processes still loading).
   external  a server owns the model; concurrency is the server's max_concurrent.
 
-With [resources].manage_ram = false none of this applies: the pool runs exactly one
-instance and never refuses to load for lack of RAM.
+With [resources].manage_ram = false (the default) none of this applies: the pool runs
+exactly one instance, never refuses to load for lack of RAM, and leaves memory to the
+OS. Either way, a model file over [resources].warn_ram_share of total RAM is warned about.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from typing import Callable, Iterator
 
 from .backends.base import Backend
 from .context.embed import ram_mb
-from .resources import CapacityReport, RamInfo, capacity
+from .resources import CapacityReport, RamInfo, capacity, model_file_mb, ram_share_warning
 
 
 class ModelPool:
@@ -45,10 +46,21 @@ class ModelPool:
 
     @property
     def ram_managed(self) -> bool:
-        return bool(self.cfg["resources"].get("manage_ram", True))
+        return bool(self.cfg["resources"].get("manage_ram", False))
 
     def report(self) -> CapacityReport:
-        return self._measured_report() if self.ram_managed else self._unmanaged_report()
+        rep = self._measured_report() if self.ram_managed else self._unmanaged_report()
+        rep.warning = ram_share_warning(rep.model_file_mb, self.cfg["resources"], rep.ram.total_mb or None)
+        return rep
+
+    def ram_warning(self) -> str:
+        """The share-of-RAM warning alone, without measuring free RAM."""
+        if self.cfg["model"]["backend"] == "mock" or self.memory == "external":
+            return ""
+        res = self.cfg["resources"]
+        path = self.cfg["model"]["path"]
+        mb = res.get("model_mb") or (model_file_mb(path) if path else 0)
+        return ram_share_warning(mb, res)
 
     def _measured_report(self) -> CapacityReport:
         m = self.cfg["model"]
@@ -78,10 +90,9 @@ class ModelPool:
             rep = self._measured_report()
         except Exception:  # RAM unreadable on this system: nothing to show
             rep = CapacityReport(RamInfo(0, 0, "unavailable"), 0, 0, 0, 1, True)
-        warn = "" if rep.fits else " WARNING: by this estimate the model does not fit."
         rep.fits, rep.max_instances = True, 1
-        rep.note = ("RAM management disabled ([resources].manage_ram = false): "
-                    "one instance, no RAM checks." + warn)
+        rep.note = ("RAM is left to the OS ([resources].manage_ram = false): one instance, no RAM checks "
+                    "before loading.")
         return rep
 
     @property

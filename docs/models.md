@@ -62,15 +62,19 @@ is 32,003 tokens. Only the file header and tensor tables are read (about 0.2 s).
   `.task` file), the harness uses 4096 and says so.
 
 ## RAM and instances
-The harness reads total and available RAM (from psutil, `/proc/meminfo` with cgroup
-limits, `vm_stat`, or Win32) and estimates the RAM one instance needs: the model file
-size × `overhead_factor`, plus the KV cache for the context size (exact from the model
-file when it can be read; estimated otherwise). It refuses to start a model that does
-not fit. Code: `resources.py`, `pool.py`.
+By default the harness leaves memory to the OS (`[resources].manage_ram = false`): it
+runs one model instance and never refuses to load. It only warns, when the model loads,
+under Settings → Status on the web, and when you pull a model, if the model file is
+more than `[resources].warn_ram_share` (30%) of the machine's total RAM. A 2 GB model on
+an 8 GB machine (25%) gets no warning. Set `warn_ram_share = 0` to never warn.
 
-- Code mode (expanding, `parallel` runs) starts more model
-  instances when there is more than one thing to do, as many as fit. `/resources` (or
+With `[resources].manage_ram = true` the harness reads total and available RAM (from
+psutil, `/proc/meminfo` with cgroup limits, `vm_stat`, or Win32) and estimates the RAM
+one instance needs: the model file size × `overhead_factor`, plus the KV cache for the
+context size (exact from the model file when it can be read; estimated otherwise). It
+refuses to start a model that does not fit, lowers an automatic context size to fit
+free RAM, and keeps `reserve_ram_mb` free. Code: `resources.py`, `pool.py`.
+
+- Then Code mode (expanding, `parallel` runs) starts more model instances when there is
+  more than one thing to do, as many as fit (up to `max_instances`). `/resources` (or
   Settings on the web) shows how many fit.
-- To turn this off, set `[resources].manage_ram = false`. The harness then runs exactly
-  one instance and never refuses to load. `/resources` still shows the estimate, with
-  a warning if the model looks too big.

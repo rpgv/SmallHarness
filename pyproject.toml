@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smallharness"
-version = "4.1.2"
+version = "4.2.0"
 description = "A rigid harness that offloads context, tool and plan management from small local models (LiteRT-LM)."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -100,6 +100,7 @@ class CapacityReport:
     max_instances: int         # how many instances fit (capped by config)
     fits: bool
     note: str = ""
+    warning: str = ""          # the model takes a large share of total RAM
 
     def describe(self) -> str:
         lines = [
@@ -109,6 +110,8 @@ class CapacityReport:
         ]
         if self.note:
             lines.append(self.note)
+        if self.warning:
+            lines.append("WARNING: " + self.warning)
         if self.fits:
             lines.append(f"Capacity: {self.max_instances} instance(s)")
         else:
@@ -162,7 +165,7 @@ def choose_context(model_cfg: dict, res_cfg: dict, model_path: str, model_max: i
     tokens = min(model_max, cap)
     why = f"auto: the model supports {model_max} tokens" + (f" (per {source})" if source else "")
     why += f"; capped at auto_context_max {cap}" if tokens < model_max else ""
-    if res_cfg.get("manage_ram", True):
+    if res_cfg.get("manage_ram", False):
         try:
             usable = ram_info().available_mb - res_cfg.get("reserve_ram_mb", 1024)
         except Exception:
@@ -177,6 +180,24 @@ def choose_context(model_cfg: dict, res_cfg: dict, model_path: str, model_max: i
                 why += f"; lowered to {fitted} to fit free RAM"
                 tokens = fitted
     return ContextChoice(tokens, why, model_max)
+
+
+def ram_share_warning(model_mb: int, res_cfg: dict, total_mb: int | None = None) -> str:
+    """A warning when a model of `model_mb` takes more than [resources].warn_ram_share of
+    total RAM ("" otherwise, or when RAM cannot be read). Only a warning: the OS manages
+    memory, and a model that is too big swaps or is stopped by it."""
+    share = float(res_cfg.get("warn_ram_share", 0.30) or 0)
+    if not model_mb or share <= 0:
+        return ""
+    if total_mb is None:
+        try:
+            total_mb = ram_info().total_mb
+        except Exception:
+            return ""
+    if not total_mb or model_mb <= share * total_mb:
+        return ""
+    return (f"the model ({model_mb} MB) is {model_mb * 100 // total_mb}% of this machine's {total_mb} MB of RAM "
+            f"(warning above {share:.0%}): other programs, or the model, may slow down or be stopped")
 
 
 def capacity(model_path: str, context_tokens: int, res_cfg: dict, already_loaded: int = 0) -> CapacityReport:

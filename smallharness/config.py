@@ -54,7 +54,8 @@ DEFAULTS: dict[str, Any] = {
         "timeout": 600,
     },
     "resources": {
-        "manage_ram": True,           # false: no RAM checks, exactly one model instance
+        "manage_ram": False,          # true: check RAM before loading, run as many instances as fit
+        "warn_ram_share": 0.30,       # warn when the model file is more than this share of total RAM (0: never)
         "reserve_ram_mb": 1024,       # RAM left for the OS and harness
         "overhead_factor": 1.25,      # runtime overhead over the model file size
         "kv_cache_mb": 0,             # 0 = estimate from context_tokens

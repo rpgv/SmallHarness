@@ -26,6 +26,7 @@
   <button data-view="research">Research</button>
   <button data-view="notes">Notes</button>
   <button data-view="code">Code</button>
+  <button data-view="tts" title="read text and files aloud">TTS</button>
   <button data-view="models">Models</button>
   <button data-view="settings">Settings</button>
   <div class="relics-nav">
@@ -102,10 +103,28 @@
     </div>
 
     <div id="pane-ask" class="rpane active">
-      <aside class="notes-side">
-        <div class="row"><strong class="grow">Notes</strong>
-          <button id="research-note-new" class="small" title="write a note in the Notes tab">New</button></div>
-        <ul id="notes" class="list plain"></ul>
+      <aside class="library-side">
+        <div class="lib-head">
+          <span id="scope-line" class="muted grow"></span>
+          <button id="scope-all" class="small link" title="questions search everything">search all</button>
+        </div>
+        <section class="lib-part">
+          <div class="row"><strong class="grow">Files</strong>
+            <label class="upload small" title="upload files into the knowledge base">Upload <input type="file" id="upload" multiple
+              accept=".txt,.md,.py,.sh,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif,.webp"></label></div>
+          <form id="add-form" class="row">
+            <input id="add-path" placeholder="add a workspace file or folder">
+            <button class="small secondary">Add</button>
+          </form>
+          <p id="add-result" class="hint" hidden></p>
+          <ul id="files" class="list plain lib-list"></ul>
+        </section>
+        <section class="lib-part">
+          <div class="row"><strong class="grow">Notes</strong>
+            <button id="research-note-new" class="small" title="write a note in the Notes tab">New</button></div>
+          <ul id="notes" class="list plain lib-list"></ul>
+        </section>
+        <p id="research-search" class="hint"></p>
       </aside>
 
       <div class="ask-main">
@@ -117,22 +136,6 @@
                     title="Enter sends; Shift+Enter starts a new line"></textarea>
           <button type="submit" id="ask-btn">Ask</button>
         </form>
-        <div class="files-bar">
-          <div class="row">
-            <strong>Files</strong>
-            <span id="scope-line" class="muted grow"></span>
-            <button id="scope-all" class="small link" title="questions search everything">search all</button>
-          </div>
-          <div id="files" class="chips"></div>
-          <form id="add-form" class="row">
-            <input id="add-path" placeholder="add a file or folder from the workspace">
-            <button class="small secondary">Add</button>
-            <label class="upload small">Upload <input type="file" id="upload" multiple
-              accept=".txt,.md,.py,.sh,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif,.webp"></label>
-          </form>
-          <p id="add-result" class="hint" hidden></p>
-          <p id="research-search" class="hint"></p>
-        </div>
       </div>
     </div>
 
@@ -355,6 +358,44 @@
           </div>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- TTS ----------------------------------------------------------------- -->
+  <section id="view-tts" class="view">
+    <div class="tts-top">
+      <form id="tts-open" class="row">
+        <input id="tts-path" placeholder="a workspace file: text, Markdown, code, PDF…" spellcheck="false" list="tts-files">
+        <datalist id="tts-files"></datalist>
+        <button class="small secondary">Open</button>
+        <label class="upload small">Upload <input type="file" id="tts-upload"
+          accept=".txt,.md,.py,.sh,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif,.webp,.html,.csv,.json,.toml,.yaml,.yml"></label>
+      </form>
+      <div class="row">
+        <select id="tts-mode" title="what the loaded model makes of the text before it is read">
+          <option value="tidy">tidy it for listening</option>
+          <option value="summary">its key points</option>
+        </select>
+        <button type="button" id="tts-prepare" class="small secondary"
+                title="the loaded model rewrites the text (or the selection); the original comes back with Undo">Prepare with the model</button>
+        <button type="button" id="tts-undo" class="small link" hidden>undo</button>
+      </div>
+      <p id="tts-status" class="hint"></p>
+    </div>
+    <div class="tts-body">
+      <textarea id="tts-text" class="editor" spellcheck="false"
+                placeholder="Paste or type text, or open a file above. Select part of it to read only that."></textarea>
+      <div id="tts-reading" class="tts-reading" aria-live="off"></div>
+    </div>
+    <div class="tts-player">
+      <button type="button" id="tts-prev" class="small secondary" title="the previous piece">⏮</button>
+      <button type="button" id="tts-play" title="read from the selected piece (or the selection, or the start)">▶ Read</button>
+      <button type="button" id="tts-next" class="small secondary" title="the next piece">⏭</button>
+      <button type="button" id="tts-stop" class="small secondary" title="stop and go back to the start">■</button>
+      <label class="tts-speed">speed <input type="range" id="tts-speed" min="0.5" max="2.5" step="0.1" value="1">
+        <span id="tts-speed-val">1.0×</span></label>
+      <span id="tts-where" class="muted grow"></span>
+      <a href="#" id="tts-voice" class="small link" title="the voice is set in Models → Speech"></a>
     </div>
   </section>
 

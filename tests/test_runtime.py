@@ -100,6 +100,7 @@ class SwitchModel(Base):
 
     def test_lower_instance_limit_stops_extra_instances(self):
         h = self.harness(path="a.litertlm")
+        h.cfg.data["resources"]["manage_ram"] = True
         h.pool.spawn(2)
         self.assertEqual(len(h.pool.instances), 3)
         done = h.reconfigure(h.cfg.with_values({"resources.manage_ram": False}))

@@ -173,23 +173,15 @@ main { grid-row: 2; grid-column: 2; min-height: 0; min-width: 0; overflow: hidde
 .rpane.split.active { display: grid; }
 /* Ask: notes on the left; the thread in a centred column, with what is kept in mind on
    top and the question box, then the files, at the bottom */
-#pane-ask.active { display: grid; grid-template-columns: minmax(180px, 230px) 1fr; gap: 18px; overflow: hidden; }
-.notes-side { min-height: 0; overflow: auto; padding-right: 14px; border-right: 1px solid var(--blue-dim); }
-.notes-side .list > li { padding: 5px 6px; gap: 6px; align-items: center; min-width: 0; }
-.notes-side .list > li a { flex: 1; min-width: 0; color: var(--text); text-decoration: none;
-                           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#pane-ask.active { display: grid; grid-template-columns: minmax(220px, 290px) 1fr; gap: 18px; overflow: hidden; }
 .messages > * { flex-shrink: 0; }   /* a long thread scrolls; it never squashes its cards */
 .ask-main > :not(.messages) { flex-shrink: 0; }
-.notes-side .list > li a:hover { color: var(--blue); }
 .ask-main { display: flex; flex-direction: column; min-height: 0; min-width: 0; width: 100%;
             max-width: var(--thread); margin: 0 auto; }
 .pins { border: 1px solid var(--red-dim); background: var(--red-soft); padding: 6px 10px; margin-bottom: 8px;
             max-height: 22vh; overflow: auto; }
 .pins-head { color: var(--red); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 2px; }
 .pins-item { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; padding: 2px 0; }
-.files-bar { border-top: 1px dashed var(--blue-dim); padding-top: 8px; margin-top: 4px; max-height: 28vh; overflow: auto; }
-.files-bar .row { margin: 4px 0; }
-.files-bar .hint { margin: 2px 0; }
 .file-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--line); padding: 1px 4px 1px 8px;
              font-size: 12px; max-width: 100%; }
 .file-chip label { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -346,8 +338,6 @@ dialog::backdrop { background: rgb(0 0 0 / .7); }
   #view-research.active { overflow: auto; }
   #pane-ask.active { grid-template-columns: 1fr; grid-template-rows: auto auto; gap: 8px; overflow: visible; }
   .ask-main .messages { flex: none; overflow: visible; }
-  .files-bar { max-height: none; }
-  .notes-side { max-height: 22vh; border-right: 0; border-bottom: 1px solid var(--blue-dim); padding: 0 0 6px; }
   body { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
   .tabs { grid-row: 2; flex-direction: row; padding: 0 8px; border-right: 0; border-bottom: 1px solid var(--blue-dim); overflow-x: auto; }
   .tabs button { border-left: 0; border-bottom: 2px solid transparent; padding: 9px 10px; }
@@ -443,3 +433,46 @@ button.mic.working { opacity: 0.5; cursor: progress; }
 .apply-pick select { font-size: 11.5px; padding: 1px 4px; }
 #relic-sections { margin: 2px 0 4px; }
 #relic-sections .file-chip label { font-family: var(--mono); }
+/* Research: the library column, files above notes, each scrolling on its own */
+.library-side { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0;
+                padding-right: 14px; border-right: 1px solid var(--blue-dim); }
+.lib-head { display: flex; gap: 6px; align-items: baseline; font-size: 12px; }
+.lib-part { display: flex; flex-direction: column; flex: 1 1 0; min-height: 90px; }
+.lib-part > .row, .lib-part > form, .lib-part > .hint { flex-shrink: 0; margin: 2px 0; }
+.lib-part form input { flex: 1; min-width: 0; }
+.lib-list { flex: 1; min-height: 0; overflow: auto; border-top: 1px dashed var(--blue-dim); margin: 4px 0 0; }
+.lib-list > li { display: flex; padding: 4px 4px; gap: 6px; align-items: center; min-width: 0; }
+.lib-list > li.active { background: var(--blue-soft); }
+.lib-list .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                  color: var(--text); text-decoration: none; font-size: 12.5px; }
+.lib-list a.name:hover { color: var(--blue); }
+.library-side > .hint { flex-shrink: 0; margin: 0; }
+@media (max-width: 760px) {
+  .library-side { border-right: 0; border-bottom: 1px solid var(--blue-dim); padding: 0 0 6px; }
+  .lib-part { flex: none; }
+  .lib-list { max-height: 22vh; }
+}
+/* TTS: the text on the left, the pieces being read on the right, the player below */
+#view-tts.active { display: flex; flex-direction: column; gap: 8px; min-height: 0; height: 100%; }
+.tts-top .row { gap: 6px; margin: 4px 0; flex-wrap: wrap; }
+.tts-top #tts-path { flex: 1; min-width: 160px; }
+.tts-top .hint { margin: 2px 0; min-height: 1.2em; }
+.tts-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.tts-body textarea { height: 100%; min-height: 160px; resize: none; }
+.tts-reading { overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px;
+               line-height: 1.6; background: var(--panel); }
+.tts-reading p { margin: 0 0 .6em; }
+.tts-seg { cursor: pointer; border-radius: 3px; padding: 1px 0; }
+.tts-seg:hover { background: var(--blue-soft); }
+.tts-seg.done { color: var(--muted); }
+.tts-seg.now { background: var(--red-soft); color: var(--text); box-shadow: 0 0 0 2px var(--red-soft); }
+.tts-seg.start { text-decoration: underline dotted var(--blue); }
+.tts-player { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 0 2px;
+              border-top: 1px solid var(--red-dim); flex-shrink: 0; }
+.tts-speed { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; }
+.tts-speed input { width: 120px; }
+@media (max-width: 760px) {
+  .tts-body { grid-template-columns: 1fr; }
+  .tts-body textarea { height: 30vh; }
+  .tts-reading { max-height: 40vh; }
+}

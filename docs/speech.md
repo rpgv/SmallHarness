@@ -39,6 +39,25 @@ engines, models and voice.
   dictation needs HTTPS. *speak* on an answer reads it aloud (code blocks and links
   are left out); press it again to stop.
 
+## The TTS tab
+The web page's **TTS** tab reads any text aloud with the text-to-speech voice above.
+
+- **The text.** Type or paste it, open a workspace file (text, Markdown, code; PDFs
+  and images are read as the knowledge base reads them, with `pdftotext` and OCR), or
+  upload one (read, not kept).
+- **Reading.** The text is cut into pieces (sentences, joined while short; a paragraph
+  starts a new piece) and shown on the right. *Read* speaks them one after another,
+  making the next pieces while one plays, and marks the piece being read. Click a piece
+  to read from there; ⏮ ⏭ move a piece; ■ goes back to the start. Select part of the
+  text to read only that. The speed slider (0.5–2.5×) works with any voice, and is
+  remembered.
+- **With the loaded model.** *Prepare with the model* rewrites the text, or the
+  selection, before it is read: *tidy it for listening* keeps the words but drops what
+  sounds bad aloud (reference marks, URLs, tables, code, Markdown), and *its key
+  points* gives a short version to get through a long file faster. A long text goes
+  in parts that fit the context. *undo* brings the original back. Code: `speech.py`
+  (`segments`, `read_file`, `prepare`).
+
 ## Settings (`[speech]`)
 | key | default | |
 |---|---|---|

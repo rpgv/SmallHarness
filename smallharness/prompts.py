@@ -131,3 +131,12 @@ def render(template: str, system: str, turns: list[tuple[str, str]]) -> str:
 
 
 STOP = {"plain": ["\nUSER:", "\nTOOL RESULT:"], "gemma": ["<end_of_turn>", "<start_of_turn>"]}
+
+# The TTS tab: the loaded model rewrites a text before it is read aloud.
+READ_TIDY = ("Rewrite the user's text so it reads well aloud. Keep its words and order; drop what "
+             "sounds bad when spoken: reference marks like [3], URLs, page headers and numbers, "
+             "tables (say what they show in a sentence), code (say what it does), and Markdown. "
+             "Spell out symbols and abbreviations. Reply with the rewritten text only.")
+READ_SUMMARY = ("Give the key points of the user's text, to be read aloud: short plain sentences, one "
+                "point per paragraph, most important first, no lists, symbols or Markdown. Keep names, "
+                "numbers and conclusions. Reply with the key points only.")
